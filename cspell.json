@@ -1,0 +1,35 @@
+{
+  "version": "0.2",
+  "language": "en",
+  "words": [
+    "figurein",
+    "Origs",
+    "Horiz",
+    "contenteditable",
+    "PRACH",
+    "Subframe",
+    "VIEWBOX",
+    "claude",
+    "perp",
+    "roastedbeans",
+    "pathd",
+    "subframe",
+    "lifeline",
+    "lifelines",
+    "pictogram",
+    "pictograms",
+    "middlebox",
+    "checkmark",
+    "trojan",
+    "ASIC",
+    "SIEM"
+  ],
+  "ignorePaths": [
+    "node_modules/**",
+    ".next/**",
+    "public/**",
+    "*.lock",
+    "src/lib/icons.json",
+    "src/lib/icons.ts.bak"
+  ]
+}
