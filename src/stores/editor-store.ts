@@ -647,6 +647,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         tool,
         ...withSel([]),
         editingGroupId: null,
+        editingConnectorId: null,
         editingTextId: null,
         autoEditTextId: null,
         // Switching to any tool other than "path" drops the pending shape so
@@ -878,6 +879,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         history: newHistory,
         future: [],
         editingGroupId: null,
+        editingConnectorId: null,
         dirtyPageIds: addDirty(state.dirtyPageIds, state.currentPageId),
       });
     },
@@ -1263,6 +1265,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         tool: "select",
         ...withSel([]),
         editingGroupId: null,
+        editingConnectorId: null,
         editingTextId: null,
         autoEditTextId: null,
         // pendingMeasure is page-scoped: it tracks text ids that need first-
@@ -1394,6 +1397,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         canvas: { ...prevCanvas, zoom: 1, panX: 0, panY: 0 },
         marquee: null,
         editingGroupId: null,
+        editingConnectorId: null,
         editingTextId: null,
         autoEditTextId: null,
         snapTargetId: null,
