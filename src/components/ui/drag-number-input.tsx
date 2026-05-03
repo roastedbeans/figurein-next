@@ -66,9 +66,18 @@ export function DragNumberInput({
     [clamp, step, decimals]
   );
 
+  // Coerce non-finite / missing input to 0. The prop is typed as `number`,
+  // but stale store reads or partially-initialized elements can produce
+  // undefined or NaN at runtime — better to render a 0 the user can see and
+  // edit than to crash the whole toolbar.
+  const safeValue = Number.isFinite(value) ? value : 0;
+
   const formatted = React.useMemo(
-    () => (decimals > 0 ? value.toFixed(decimals) : String(Math.round(value))),
-    [value, decimals]
+    () =>
+      decimals > 0
+        ? safeValue.toFixed(decimals)
+        : String(Math.round(safeValue)),
+    [safeValue, decimals]
   );
 
   const [text, setText] = React.useState<string>(formatted);
@@ -87,7 +96,7 @@ export function DragNumberInput({
 
     const startX = e.clientX;
     const startY = e.clientY;
-    const startV = value;
+    const startV = safeValue;
     let moved = false;
 
     const prevBodyCursor = document.body.style.cursor;

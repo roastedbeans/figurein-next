@@ -17,11 +17,6 @@ export type SaveStatus =
 // they tab away. Tuned together with the server action's transaction.
 const AUTO_SAVE_DEBOUNCE_MS = 800;
 
-// TEMP: kill-switch for the autosave subscription + network trip while we
-// profile whether the per-mutation signature hashing / subscribe callback is
-// contributing to canvas lag. Flip back to false to re-enable autosave.
-const DISABLE_AUTOSAVE = false;
-
 /**
  * Binds a project in the editor store to its `projects` + `figures` rows.
  *
@@ -234,7 +229,6 @@ export function useProjectPersistence(projectId: string | null) {
   // and flips the dirty sets when page structure changes.
   useEffect(() => {
     if (!projectId) return;
-    if (DISABLE_AUTOSAVE) return;
 
     const unsubscribe = useEditorStore.subscribe((state, prev) => {
       if (!loadedRef.current) return;
@@ -255,7 +249,6 @@ export function useProjectPersistence(projectId: string | null) {
   }, [projectId, scheduleSave]);
 
   const saveNow = useCallback(async () => {
-    if (DISABLE_AUTOSAVE) return;
     if (debounceRef.current) {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
@@ -272,7 +265,7 @@ export function useProjectPersistence(projectId: string | null) {
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
         debounceRef.current = null;
-        if (!DISABLE_AUTOSAVE) void doSave();
+        void doSave();
       }
     };
   }, [doSave]);

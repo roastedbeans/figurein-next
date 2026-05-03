@@ -4,10 +4,10 @@ import { memo } from "react";
 import { elementById, useEditorStore } from "@/stores/editor-store";
 import { RectElement } from "./elements/RectElement";
 import { CircleElement } from "./elements/CircleElement";
-import { LineElement } from "./elements/LineElement";
 import { ArrowElement } from "./elements/ArrowElement";
 import { TextElement } from "./elements/TextElement";
 import { IconElement } from "./elements/IconElement";
+import { ImageElement as UserImageElement } from "./elements/ImageElement";
 import { PathElement } from "./elements/PathElement";
 import { FrameElement } from "./elements/FrameElement";
 
@@ -36,24 +36,22 @@ function CanvasElementImpl({
   // this guard every nested child would draw twice — once at top level,
   // once inside the frame.
   if (!rendersAsChild && element.parentId !== null) return null;
+
+  // data-drag-wrapper targets this <g> for imperative CSS transforms during
+  // drag, bypassing React reconciliation for the translation delta.
+  let child: React.ReactNode;
   switch (element.type) {
-    case "rectangle":
-      return <RectElement element={element} />;
-    case "circle":
-      return <CircleElement element={element} />;
-    case "line":
-      return <LineElement element={element} />;
-    case "arrow":
-      return <ArrowElement element={element} />;
-    case "text":
-      return <TextElement element={element} />;
-    case "icon":
-      return <IconElement element={element} />;
-    case "path":
-      return <PathElement element={element} />;
-    case "frame":
-      return <FrameElement element={element} />;
+    case "rectangle": child = <RectElement element={element} />; break;
+    case "circle": child = <CircleElement element={element} />; break;
+    case "arrow": child = <ArrowElement element={element} />; break;
+    case "text": child = <TextElement element={element} />; break;
+    case "icon": child = <IconElement element={element} />; break;
+    case "image": child = <UserImageElement element={element} />; break;
+    case "path": child = <PathElement element={element} />; break;
+    case "frame": child = <FrameElement element={element} />; break;
+    default: return null;
   }
+  return <g data-drag-wrapper={id}>{child}</g>;
 }
 
 // Memoized so identity on `id` is sufficient to skip the inner selector setup

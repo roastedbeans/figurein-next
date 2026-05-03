@@ -1,4 +1,4 @@
-import { memo } from "react";
+import { memo, useRef, useEffect, useState } from "react";
 import type { ArrowElement as ArrowElementType, EdgeDir } from "@/types/editor";
 import { GRID_SIZE } from "@/lib/constants";
 import { strokeDashArray, strokeLineCap } from "@/lib/stroke";
@@ -430,6 +430,50 @@ export type ConnectorLabelPositions = {
   target: { x: number; y: number };
 };
 
+/** Point and perpendicular offset on a quadratic bezier at parameter t. */
+function bezierPointWithPerp(
+  x0: number, y0: number,
+  cpx: number, cpy: number,
+  x2: number, y2: number,
+  t: number,
+  perp: number
+): { x: number; y: number } {
+  const omt = 1 - t;
+  const px = omt * omt * x0 + 2 * omt * t * cpx + t * t * x2;
+  const py = omt * omt * y0 + 2 * omt * t * cpy + t * t * y2;
+  // Tangent: B'(t) = 2(1-t)(P1-P0) + 2t(P2-P1)
+  const tx = 2 * omt * (cpx - x0) + 2 * t * (x2 - cpx);
+  const ty = 2 * omt * (cpy - y0) + 2 * t * (y2 - cpy);
+  const ang = Math.atan2(ty, tx);
+  return {
+    x: px + Math.sin(ang) * perp,
+    y: py - Math.cos(ang) * perp,
+  };
+}
+
+/** Position `dist` along the start (or end) segment of a polyline, offset
+ *  perpendicular by `perp`. `dist` is clamped to half the segment length so
+ *  the label can't run past a short first/last segment into the next one. */
+function segmentEndOffset(
+  segs: [number, number][],
+  fromStart: boolean,
+  along: number,
+  perp: number
+): { x: number; y: number } {
+  if (segs.length < 2) {
+    return { x: segs[0]?.[0] ?? 0, y: segs[0]?.[1] ?? 0 };
+  }
+  const a = fromStart ? segs[0] : segs[segs.length - 1];
+  const b = fromStart ? segs[1] : segs[segs.length - 2];
+  const segLen = Math.hypot(b[0] - a[0], b[1] - a[1]);
+  const dist = Math.min(along, segLen / 2);
+  const ang = Math.atan2(b[1] - a[1], b[0] - a[0]);
+  return {
+    x: a[0] + Math.cos(ang) * dist + Math.sin(ang) * perp,
+    y: a[1] + Math.sin(ang) * dist - Math.cos(ang) * perp,
+  };
+}
+
 /** Compute the three anchor positions for connector labels.
  *  Pass `fullPath` (from `buildPath`) to skip re-running elbow routing.
  *  All coordinates are in canvas (SVG world) space. */
@@ -439,8 +483,10 @@ export function computeLabelPositions(
 ): ConnectorLabelPositions {
   const { x, y, x2, y2 } = element;
   const style = element.lineStyle || "straight";
+  const ALONG = 24;
+  const PERP = 12;
 
-  // Center label position
+  // ---- Center label position ----
   let centerX: number;
   let centerY: number;
   if (style === "curved") {
@@ -470,49 +516,48 @@ export function computeLabelPositions(
     centerY = (y + y2) / 2;
   }
 
-  // Forward angles — direction of travel leaving start and arriving at end
-  let fwdStart: number;
-  let fwdEnd: number;
+  // ---- Source / target label positions ----
+  // Each style follows the actual rendered geometry so labels stay visually
+  // anchored: curved uses on-curve points (not linear extrapolation from the
+  // tangent), elbow clamps to the first/last segment so the label can't leak
+  // past a corner, straight clamps to half the line length so the two
+  // endpoint labels never cross over each other on short connectors.
+  let source: { x: number; y: number };
+  let target: { x: number; y: number };
+
   if (style === "curved") {
     const dp = getDefaultControlPoint(x, y, x2, y2);
     const cpx = element.cx ?? dp.cx;
     const cpy = element.cy ?? dp.cy;
-    fwdStart = Math.atan2(cpy - y, cpx - x);
-    fwdEnd = Math.atan2(y2 - cpy, x2 - cpx);
+    // Approximate arc length: average of chord and control polyline. Pick t
+    // so the label sits ≈ALONG along the curve, but bounded to [0.05, 0.4]
+    // so it never collides with the center label or the endpoint.
+    const chord = Math.hypot(x2 - x, y2 - y);
+    const poly = Math.hypot(cpx - x, cpy - y) + Math.hypot(x2 - cpx, y2 - cpy);
+    const approxLen = (chord + poly) / 2;
+    const t = Math.min(0.4, Math.max(0.05, ALONG / Math.max(approxLen, 1)));
+    source = bezierPointWithPerp(x, y, cpx, cpy, x2, y2, t, PERP);
+    target = bezierPointWithPerp(x, y, cpx, cpy, x2, y2, 1 - t, PERP);
   } else if (style === "elbow") {
     const d = fullPath ?? buildPath(element);
     const segs = parsePathPoints(d);
-    if (segs.length >= 2) {
-      fwdStart = Math.atan2(segs[1][1] - segs[0][1], segs[1][0] - segs[0][0]);
-      const last = segs.length - 1;
-      fwdEnd = Math.atan2(
-        segs[last][1] - segs[last - 1][1],
-        segs[last][0] - segs[last - 1][0]
-      );
-    } else {
-      fwdStart = Math.atan2(y2 - y, x2 - x);
-      fwdEnd = fwdStart;
-    }
+    source = segmentEndOffset(segs, true, ALONG, PERP);
+    target = segmentEndOffset(segs, false, ALONG, PERP);
   } else {
-    fwdStart = Math.atan2(y2 - y, x2 - x);
-    fwdEnd = fwdStart;
+    const lineLen = Math.hypot(x2 - x, y2 - y);
+    const along = Math.min(ALONG, lineLen / 2);
+    const fwd = Math.atan2(y2 - y, x2 - x);
+    source = {
+      x: x + Math.cos(fwd) * along + Math.sin(fwd) * PERP,
+      y: y + Math.sin(fwd) * along - Math.cos(fwd) * PERP,
+    };
+    target = {
+      x: x2 - Math.cos(fwd) * along + Math.sin(fwd) * PERP,
+      y: y2 - Math.sin(fwd) * along - Math.cos(fwd) * PERP,
+    };
   }
 
-  // 24px along from endpoint + 12px perpendicular (90° CW = visually above a
-  // horizontal line; consistent for any orientation)
-  const ALONG = 24;
-  const PERP = 12;
-  return {
-    center: { x: centerX, y: centerY },
-    source: {
-      x: x + Math.cos(fwdStart) * ALONG + Math.sin(fwdStart) * PERP,
-      y: y + Math.sin(fwdStart) * ALONG - Math.cos(fwdStart) * PERP,
-    },
-    target: {
-      x: x2 - Math.cos(fwdEnd) * ALONG + Math.sin(fwdEnd) * PERP,
-      y: y2 - Math.sin(fwdEnd) * ALONG - Math.cos(fwdEnd) * PERP,
-    },
-  };
+  return { center: { x: centerX, y: centerY }, source, target };
 }
 
 // ---------------------------------------------------------------------------
@@ -557,29 +602,52 @@ export function getElbowSegmentHandles(element: ArrowElementType): ElbowSegmentH
 // Component
 // ---------------------------------------------------------------------------
 
-/** Renders a single connector label: white background rect + text. */
+/** Bounding rect of a connector label — shared between the label render and
+ *  the connector's mask so the line is knocked out exactly where the label
+ *  sits, with no visible background fill. */
+function labelRectBounds(text: string, pos: { x: number; y: number }) {
+  const PAD = 3;
+  const w = Math.max(20, text.length * 7) + PAD * 2;
+  const h = 16;
+  return { x: pos.x - w / 2, y: pos.y - h / 2, width: w, height: h };
+}
+
+/** Renders a single connector label: transparent hit-target rect + text.
+ *  The visible "background" is achieved by masking the connector line at
+ *  this rect's bounds (see `ArrowElementImpl`), so the label always reads
+ *  cleanly without a white box. */
 function LabelNode({
   text,
   pos,
   stroke,
+  onMouseDown,
+  onDoubleClick,
 }: {
   text: string;
   pos: { x: number; y: number };
   stroke: string;
+  onMouseDown?: (e: React.MouseEvent<SVGGElement>) => void;
+  onDoubleClick?: (e: React.MouseEvent<SVGGElement>) => void;
 }) {
-  const PAD = 3;
-  const w = Math.max(20, text.length * 7) + PAD * 2;
-  const h = 16;
+  const [hover, setHover] = useState(false);
+  const b = labelRectBounds(text, pos);
   return (
-    <g pointerEvents="none">
+    <g
+      style={{ cursor: "move" }}
+      onMouseDown={onMouseDown}
+      onDoubleClick={onDoubleClick}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
       <rect
-        x={pos.x - w / 2}
-        y={pos.y - h / 2}
-        width={w}
-        height={h}
+        x={b.x}
+        y={b.y}
+        width={b.width}
+        height={b.height}
         rx={2}
-        fill="white"
-        opacity={0.85}
+        fill="transparent"
+        stroke={hover ? "hsl(221 83% 53%)" : "none"}
+        strokeWidth={1}
       />
       <text
         x={pos.x}
@@ -589,12 +657,15 @@ function LabelNode({
         fontSize={12}
         fill={stroke}
         fontFamily="inherit"
+        pointerEvents="none"
       >
         {text}
       </text>
     </g>
   );
 }
+
+type LabelRole = "source" | "center" | "target";
 
 function ArrowElementImpl({ element, dataId }: { element: ArrowElementType; dataId?: string }) {
   // Subscribe to the bound elements so a resize / move of the connector's
@@ -614,14 +685,98 @@ function ArrowElementImpl({ element, dataId }: { element: ArrowElementType; data
   const resolved = resolveConnectorEndpoints(element, startBound, endBound);
 
   const updateElement = useEditorStore((s) => s.updateElement);
-  const editingConnectorId = useEditorStore((s) => s.editingConnectorId);
-  const setEditingConnectorId = useEditorStore((s) => s.setEditingConnectorId);
-  const isEditing = editingConnectorId === element.id;
+  const updateElementLive = useEditorStore((s) => s.updateElementLive);
+  const editingConnectorLabel = useEditorStore((s) => s.editingConnectorLabel);
+  const setEditingConnectorLabel = useEditorStore((s) => s.setEditingConnectorLabel);
+  const editingRole: LabelRole | null =
+    editingConnectorLabel?.id === element.id ? editingConnectorLabel.role : null;
+
+  // Track committed state for the inline editor to prevent double history push
+  const editCommittedRef = useRef(false);
+  useEffect(() => {
+    if (editingRole !== null) editCommittedRef.current = false;
+  }, [editingRole]);
+
+  // Drag state for label repositioning
+  const dragRef = useRef<{
+    role: LabelRole;
+    startClientX: number;
+    startClientY: number;
+    origDx: number;
+    origDy: number;
+  } | null>(null);
 
   const fullPath = buildPath(resolved);
   const headSize = Math.max(resolved.strokeWidth * 4, 8);
   const trimmedPath = buildTrimmedPath(resolved, headSize, fullPath);
   const labelPositions = computeLabelPositions(resolved, fullPath);
+
+  // Apply stored offsets to computed anchor positions
+  function applyOffset(
+    base: { x: number; y: number },
+    offset: { dx: number; dy: number } | undefined
+  ) {
+    return offset ? { x: base.x + offset.dx, y: base.y + offset.dy } : base;
+  }
+  const sourceLabelPos = applyOffset(labelPositions.source, element.sourceLabelOffset);
+  const centerLabelPos = applyOffset(labelPositions.center, element.labelOffset);
+  const targetLabelPos = applyOffset(labelPositions.target, element.targetLabelOffset);
+
+  function labelPos(role: LabelRole) {
+    return role === "source" ? sourceLabelPos : role === "center" ? centerLabelPos : targetLabelPos;
+  }
+  function labelOffsetKey(role: LabelRole): "sourceLabelOffset" | "labelOffset" | "targetLabelOffset" {
+    return role === "source" ? "sourceLabelOffset" : role === "center" ? "labelOffset" : "targetLabelOffset";
+  }
+  function labelValueKey(role: LabelRole): "sourceLabel" | "label" | "targetLabel" {
+    return role === "source" ? "sourceLabel" : role === "center" ? "label" : "targetLabel";
+  }
+
+  function handleLabelMouseDown(role: LabelRole) {
+    return (e: React.MouseEvent<SVGGElement>) => {
+      e.stopPropagation();
+      const key = labelOffsetKey(role);
+      const cur = element[key];
+      dragRef.current = {
+        role,
+        startClientX: e.clientX,
+        startClientY: e.clientY,
+        origDx: cur?.dx ?? 0,
+        origDy: cur?.dy ?? 0,
+      };
+
+      function onMouseMove(me: MouseEvent) {
+        if (!dragRef.current) return;
+        const { zoom } = useEditorStore.getState().canvas;
+        const dx = dragRef.current.origDx + (me.clientX - dragRef.current.startClientX) / zoom;
+        const dy = dragRef.current.origDy + (me.clientY - dragRef.current.startClientY) / zoom;
+        const k = labelOffsetKey(dragRef.current.role);
+        updateElementLive(element.id, { [k]: { dx, dy } } as Partial<ArrowElementType>);
+      }
+
+      function onMouseUp(me: MouseEvent) {
+        if (!dragRef.current) return;
+        const { zoom } = useEditorStore.getState().canvas;
+        const dx = dragRef.current.origDx + (me.clientX - dragRef.current.startClientX) / zoom;
+        const dy = dragRef.current.origDy + (me.clientY - dragRef.current.startClientY) / zoom;
+        const k = labelOffsetKey(dragRef.current.role);
+        updateElement(element.id, { [k]: { dx, dy } } as Partial<ArrowElementType>);
+        dragRef.current = null;
+        window.removeEventListener("mousemove", onMouseMove);
+        window.removeEventListener("mouseup", onMouseUp);
+      }
+
+      window.addEventListener("mousemove", onMouseMove);
+      window.addEventListener("mouseup", onMouseUp);
+    };
+  }
+
+  function handleLabelDoubleClick(role: LabelRole) {
+    return (e: React.MouseEvent<SVGGElement>) => {
+      e.stopPropagation();
+      setEditingConnectorLabel({ id: element.id, role });
+    };
+  }
 
   // Compute arrowhead at end
   let headNode: React.ReactNode = null;
@@ -681,9 +836,49 @@ function ArrowElementImpl({ element, dataId }: { element: ArrowElementType; data
     );
   }
 
+  // Mask: knock out the connector line where labels sit, so labels read over
+  // the line without needing an opaque background fill. Mask is built only
+  // when at least one label is visible (and not currently in inline edit).
+  const maskedLabels: Array<{ text: string; pos: { x: number; y: number } }> = [];
+  if (resolved.sourceLabel && editingRole !== "source") {
+    maskedLabels.push({ text: resolved.sourceLabel, pos: sourceLabelPos });
+  }
+  if (resolved.label && editingRole !== "center") {
+    maskedLabels.push({ text: resolved.label, pos: centerLabelPos });
+  }
+  if (resolved.targetLabel && editingRole !== "target") {
+    maskedLabels.push({ text: resolved.targetLabel, pos: targetLabelPos });
+  }
+  const maskId = `arrow-label-mask-${element.id}`;
+  const useMask = maskedLabels.length > 0;
+
   return (
     <g data-element-id={dataId ?? element.id} className="cursor-move">
-      {/* Wide transparent hit area — uses full path for easy clicking */}
+      {useMask && (
+        <mask id={maskId} maskUnits="userSpaceOnUse">
+          {/* "Show everything" — sized large enough to cover any visible
+              connector geometry without bbox math. */}
+          <rect x={-100000} y={-100000} width={200000} height={200000} fill="white" />
+          {/* Knockouts at each label's bounds. 1px outset prevents
+              antialiasing fringes along the rect edge. */}
+          {maskedLabels.map((l, i) => {
+            const b = labelRectBounds(l.text, l.pos);
+            return (
+              <rect
+                key={i}
+                x={b.x - 1}
+                y={b.y - 1}
+                width={b.width + 2}
+                height={b.height + 2}
+                rx={2}
+                fill="black"
+              />
+            );
+          })}
+        </mask>
+      )}
+      {/* Wide transparent hit area — uses full path for easy clicking. Not
+          masked so clicking on a label-covered region still hits the arrow. */}
       <path
         d={fullPath}
         fill="none"
@@ -692,50 +887,60 @@ function ArrowElementImpl({ element, dataId }: { element: ArrowElementType; data
         strokeLinecap="butt"
         strokeLinejoin="miter"
       />
-      {/* Visible path — trimmed so line stops at arrowhead base */}
-      <path
-        d={trimmedPath}
-        fill="none"
-        stroke={resolved.stroke}
-        strokeWidth={resolved.strokeWidth}
-        strokeDasharray={strokeDashArray(resolved.strokeStyle, resolved.strokeWidth)}
-        opacity={resolved.opacity}
-        strokeLinecap={strokeLineCap(resolved.strokeStyle)}
-        strokeLinejoin="miter"
-        pointerEvents="none"
-      />
-      {headNode}
-      {tailNode}
-      {/* Connector labels */}
-      {resolved.sourceLabel && (
+      <g mask={useMask ? `url(#${maskId})` : undefined}>
+        {/* Visible path — trimmed so line stops at arrowhead base */}
+        <path
+          d={trimmedPath}
+          fill="none"
+          stroke={resolved.stroke}
+          strokeWidth={resolved.strokeWidth}
+          strokeDasharray={strokeDashArray(resolved.strokeStyle, resolved.strokeWidth)}
+          opacity={resolved.opacity}
+          strokeLinecap={strokeLineCap(resolved.strokeStyle)}
+          strokeLinejoin="miter"
+          pointerEvents="none"
+        />
+        {headNode}
+        {tailNode}
+      </g>
+      {/* Connector labels — hidden when that label's inline editor is open */}
+      {resolved.sourceLabel && editingRole !== "source" && (
         <LabelNode
           text={resolved.sourceLabel}
-          pos={labelPositions.source}
+          pos={sourceLabelPos}
           stroke={resolved.stroke}
+          onMouseDown={handleLabelMouseDown("source")}
+          onDoubleClick={handleLabelDoubleClick("source")}
         />
       )}
-      {resolved.label && !isEditing && (
+      {resolved.label && editingRole !== "center" && (
         <LabelNode
           text={resolved.label}
-          pos={labelPositions.center}
+          pos={centerLabelPos}
           stroke={resolved.stroke}
+          onMouseDown={handleLabelMouseDown("center")}
+          onDoubleClick={handleLabelDoubleClick("center")}
         />
       )}
-      {resolved.targetLabel && (
+      {resolved.targetLabel && editingRole !== "target" && (
         <LabelNode
           text={resolved.targetLabel}
-          pos={labelPositions.target}
+          pos={targetLabelPos}
           stroke={resolved.stroke}
+          onMouseDown={handleLabelMouseDown("target")}
+          onDoubleClick={handleLabelDoubleClick("target")}
         />
       )}
-      {/* Inline center-label editor (activated by double-click) */}
-      {isEditing && (() => {
-        const committedRef = { current: false };
+      {/* Inline label editor — shown for the active editing role */}
+      {editingRole && (() => {
+        const pos = labelPos(editingRole);
+        const valueKey = labelValueKey(editingRole);
+        const currentValue = resolved[valueKey];
         return (
           <foreignObject
             data-no-export=""
-            x={labelPositions.center.x - 60}
-            y={labelPositions.center.y - 12}
+            x={pos.x - 60}
+            y={pos.y - 12}
             width={120}
             height={24}
             style={{ overflow: "visible" }}
@@ -744,27 +949,27 @@ function ArrowElementImpl({ element, dataId }: { element: ArrowElementType; data
               <input
                 type="text"
                 autoFocus
-                defaultValue={resolved.label ?? ""}
+                defaultValue={currentValue ?? ""}
                 onBlur={(e) => {
-                  if (!committedRef.current) {
+                  if (!editCommittedRef.current) {
                     updateElement(element.id, {
-                      label: e.currentTarget.value.trim() || undefined,
-                    });
+                      [valueKey]: e.currentTarget.value.trim() || undefined,
+                    } as Partial<ArrowElementType>);
                   }
-                  setEditingConnectorId(null);
+                  setEditingConnectorLabel(null);
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
-                    committedRef.current = true;
+                    editCommittedRef.current = true;
                     updateElement(element.id, {
-                      label: e.currentTarget.value.trim() || undefined,
-                    });
-                    setEditingConnectorId(null);
+                      [valueKey]: e.currentTarget.value.trim() || undefined,
+                    } as Partial<ArrowElementType>);
+                    setEditingConnectorLabel(null);
                     e.currentTarget.blur();
                   }
                   if (e.key === "Escape") {
-                    committedRef.current = true;
-                    setEditingConnectorId(null);
+                    editCommittedRef.current = true;
+                    setEditingConnectorLabel(null);
                     e.currentTarget.blur();
                   }
                   e.stopPropagation();

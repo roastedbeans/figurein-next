@@ -16,7 +16,7 @@ export function DashboardHeader({
           href="/dashboard"
           className="font-semibold tracking-tight hover:text-primary"
         >
-          FigureIn
+          FigurIn
         </Link>
         {breadcrumbs && (
           <>

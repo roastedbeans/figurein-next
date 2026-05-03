@@ -1,5 +1,5 @@
 {
-  "name": "figurein-next",
+  "name": "figurin-next",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -9,6 +9,7 @@
     "lint": "eslint",
     "fix:icons": "node scripts/fix-icon-colors.mjs",
     "db:apply": "bun run scripts/apply-sql.mjs",
+    "db:apply:supabase": "bun run scripts/apply-supabase-migrations.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "bun run src/db/migrate.ts",
     "db:stamp": "bun run scripts/stamp-drizzle.mjs",
@@ -28,6 +29,7 @@
     "postgres": "^3.4.9",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "sharp": "^0.34.5",
     "shadcn": "^4.2.0",
     "tailwind-merge": "^3.5.0",
     "tw-animate-css": "^1.4.0",

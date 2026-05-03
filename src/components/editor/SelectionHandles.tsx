@@ -1,12 +1,17 @@
 "use client";
 
-import type { EditorElement, ArrowElement, LineElement } from "@/types/editor";
+import type { EditorElement, ArrowElement} from "@/types/editor";
 import {
   getDefaultControlPoint,
   getElbowSegmentHandles,
   buildPath,
 } from "@/components/editor/elements/ArrowElement";
-import { useEditorStore } from "@/stores/editor-store";
+import { elementById, useEditorStore } from "@/stores/editor-store";
+import { resolveConnectorEndpoints } from "@/lib/connector-geometry";
+import {
+  getPathContentFractions,
+  resolvePathElementGeometry,
+} from "@/lib/path-element-geometry";
 
 // Shared selection handle dimensions — applied to every element type so the
 // corner circles and side pills look consistent across the editor.
@@ -108,18 +113,45 @@ function cursorForHandle(pos: HandlePosition, rotationDeg: number): string {
   }
 }
 
-export function SelectionHandles({ element }: { element: EditorElement }) {
-  // Only glow while the user is actively holding this element's rotation
-  // handle. Gated by `rotatingElementId === element.id` so static rotations
-  // at 0/45/90/… don't pulse persistently.
+export function SelectionHandles({ id }: { id: string }) {
+  // Subscribe directly to the selected element so Canvas doesn't need to
+  // re-render on every drag frame — only this component tracks position changes.
+  const element = useEditorStore((s) => elementById(s.elements, id) ?? null);
   const rotatingElementId = useEditorStore((s) => s.rotatingElementId);
+
+  // Subscribe to connector targets up-front (hooks must run every render
+  // regardless of whether `element` resolved). For non-connectors / missing
+  // elements the ids are undefined and these reduce to null subscriptions
+  // that never fire. For connectors, this is what makes endpoint handles
+  // track a moving / resizing target without the connector itself being
+  // touched.
+  const isLine = element?.type === "arrow";
+  const connectorStartId =
+    isLine ? (element as ArrowElement).startConnectedTo : undefined;
+  const connectorEndId =
+    isLine ? (element as ArrowElement).endConnectedTo : undefined;
+  const startBound = useEditorStore((s) =>
+    connectorStartId ? elementById(s.elements, connectorStartId) ?? null : null
+  );
+  const endBound = useEditorStore((s) =>
+    connectorEndId ? elementById(s.elements, connectorEndId) ?? null : null
+  );
+
+  if (!element) return null;
+
   const isRotatingThis = rotatingElementId === element.id;
-  const isLine = element.type === "line" || element.type === "arrow";
 
   if (isLine) {
-    const el = element as EditorElement & { x2: number; y2: number };
-    // Both lines and arrows now share the same connector properties
-    const connector = element as ArrowElement | LineElement;
+    // Resolve endpoints through the bound elements so the handles, outline,
+    // and rotation pivot all sit on the connector's CURRENT visible geometry,
+    // even when the targets have been moved / resized since the connector was
+    // last edited.
+    const connector = resolveConnectorEndpoints(
+      element as ArrowElement,
+      startBound,
+      endBound
+    );
+    const el = connector as EditorElement & { x2: number; y2: number };
     const lineStyle = connector.lineStyle || "straight";
 
     // Curved: single draggable control point with guide lines
@@ -199,6 +231,7 @@ export function SelectionHandles({ element }: { element: EditorElement }) {
     const onSnap = isRotatingThis && isOn45(lineAngleDeg);
 
     return (
+      <g data-selection-handles={id}>
       <g data-no-export>
         <path
           d={selectionPath}
@@ -241,18 +274,28 @@ export function SelectionHandles({ element }: { element: EditorElement }) {
             either style by dragging an endpoint. */}
         {lineStyle === "straight" && <RotateHandle cx={rotX} cy={rotY} glow={onSnap} />}
       </g>
+      </g>
     );
   }
 
   const { x, y, width, height } = element;
+  const isPath = element.type === "path";
+  const pathFr = isPath ? getPathContentFractions(element) : null;
+  const hx = pathFr ? x + pathFr.frx * width : x;
+  const hy = pathFr ? y + pathFr.fry * height : y;
+  const hw = pathFr ? pathFr.frw * width : width;
+  const hh = pathFr ? pathFr.frh * height : height;
+  const pathGeom = isPath ? resolvePathElementGeometry(element) : null;
+
   // Sit the outline flush on the outside of the element's own border.
   const pad = element.strokeWidth / 2 + OUTLINE_W / 2;
+  const pathSelStroke = Math.max(OUTLINE_W * 2, element.strokeWidth + OUTLINE_W);
 
   const corners: { pos: HandlePosition; cx: number; cy: number }[] = [
-    { pos: "top-left", cx: x - pad, cy: y - pad },
-    { pos: "top-right", cx: x + width + pad, cy: y - pad },
-    { pos: "bottom-right", cx: x + width + pad, cy: y + height + pad },
-    { pos: "bottom-left", cx: x - pad, cy: y + height + pad },
+    { pos: "top-left", cx: hx - pad, cy: hy - pad },
+    { pos: "top-right", cx: hx + hw + pad, cy: hy - pad },
+    { pos: "bottom-right", cx: hx + hw + pad, cy: hy + hh + pad },
+    { pos: "bottom-left", cx: hx - pad, cy: hy + hh + pad },
   ];
 
   // Side handles — rounded rectangles oriented parallel to the edge.
@@ -262,10 +305,10 @@ export function SelectionHandles({ element }: { element: EditorElement }) {
     cy: number;
     horizontal: boolean;
   }[] = [
-    { pos: "top", cx: x + width / 2, cy: y - pad, horizontal: true },
-    { pos: "bottom", cx: x + width / 2, cy: y + height + pad, horizontal: true },
-    { pos: "left", cx: x - pad, cy: y + height / 2, horizontal: false },
-    { pos: "right", cx: x + width + pad, cy: y + height / 2, horizontal: false },
+    { pos: "top", cx: hx + hw / 2, cy: hy - pad, horizontal: true },
+    { pos: "bottom", cx: hx + hw / 2, cy: hy + hh + pad, horizontal: true },
+    { pos: "left", cx: hx - pad, cy: hy + hh / 2, horizontal: false },
+    { pos: "right", cx: hx + hw + pad, cy: hy + hh / 2, horizontal: false },
   ];
 
   // Rotation pivot (element center). When the element is rotated, wrap the
@@ -278,9 +321,9 @@ export function SelectionHandles({ element }: { element: EditorElement }) {
     ? `rotate(${element.rotation} ${pivotX} ${pivotY})`
     : undefined;
 
-  // Rotation handle sits above the top-center side handle with a short stem.
-  const rotHandleX = x + width / 2;
-  const rotHandleY = y - pad - ROTATE_OFFSET;
+  // Rotation handle sits above the top-center of the content box.
+  const rotHandleX = hx + hw / 2;
+  const rotHandleY = hy - pad - ROTATE_OFFSET;
 
   // When the element's rotation lands on a 45° multiple, light up the
   // rotation handle with an amber glow — a visual confirmation that the
@@ -288,20 +331,54 @@ export function SelectionHandles({ element }: { element: EditorElement }) {
   const onSnap = isRotatingThis && isOn45(element.rotation || 0);
 
   return (
+    <g data-selection-handles={id}>
     <g data-no-export transform={rotateTransform}>
-      {/* Outline — same design as the hover highlight (solid blue, flush
-          outside the element's border, with drop-shadow lift). */}
-      <rect
-        x={x - pad}
-        y={y - pad}
-        width={width + pad * 2}
-        height={height + pad * 2}
-        fill="none"
-        stroke={HIGHLIGHT}
-        strokeWidth={OUTLINE_W}
-        pointerEvents="none"
-        style={{ filter: SHADOW_FILTER }}
-      />
+      {isPath && pathGeom ? (
+        <svg
+          x={x}
+          y={y}
+          width={width}
+          height={height}
+          viewBox={pathGeom.viewBox}
+          preserveAspectRatio="none"
+          overflow="visible"
+          pointerEvents="none"
+          style={{ filter: SHADOW_FILTER }}
+        >
+          <path
+            d={pathGeom.pathD}
+            fill="none"
+            stroke={HIGHLIGHT}
+            strokeWidth={pathSelStroke}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            vectorEffect="non-scaling-stroke"
+          />
+          {pathGeom.overlayD && (
+            <path
+              d={pathGeom.overlayD}
+              fill="none"
+              stroke={HIGHLIGHT}
+              strokeWidth={pathSelStroke}
+              strokeLinejoin="round"
+              strokeLinecap="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
+        </svg>
+      ) : (
+        <rect
+          x={x - pad}
+          y={y - pad}
+          width={width + pad * 2}
+          height={height + pad * 2}
+          fill="none"
+          stroke={HIGHLIGHT}
+          strokeWidth={OUTLINE_W}
+          pointerEvents="none"
+          style={{ filter: SHADOW_FILTER }}
+        />
+      )}
       {/* Corner handles — circles */}
       {corners.map((h) => (
         <circle
@@ -342,6 +419,7 @@ export function SelectionHandles({ element }: { element: EditorElement }) {
           Free rotation; semi-snaps within a few degrees of a 45° multiple
           and glows amber whenever the current angle is on one. */}
       <RotateHandle cx={rotHandleX} cy={rotHandleY} glow={onSnap} />
+    </g>
     </g>
   );
 }

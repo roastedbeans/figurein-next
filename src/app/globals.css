@@ -153,14 +153,6 @@ svg.is-dragging [data-handle] {
   pointer-events: none !important;
 }
 
-/* During active pan, drop the feDropShadow on the sheet rect. The SVG
-   filter otherwise blocks the pan <g> from being composited on the GPU —
-   with it on, Chrome re-rasterizes the whole sheet (~3200 grid lines +
-   filter convolution) on the CPU every pan frame, producing 100–160 ms of
-   presentation delay per move. The shadow reappears on mouseup. */
-svg.is-panning [data-sheet-shadow] {
-  filter: none !important;
-}
 
 /* Apple-style thin, auto-hiding scrollbars. Applied globally so every scroll
    area (sidebar panels, popovers, dialog bodies) gets the same treatment.

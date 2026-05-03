@@ -11,20 +11,18 @@ import { PageBar } from "./PageBar";
 import { SmartFigurePanel } from "./SmartFigurePanel";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { useImagePaste } from "@/hooks/use-image-paste";
-import { useCustomIconsStore } from "@/stores/custom-icons-store";
+import { useCustomImagesStore } from "@/stores/custom-images-store";
 import { useProjectPersistence } from "@/hooks/use-project-persistence";
 
 export function EditorLayout() {
   useKeyboardShortcuts();
   useImagePaste();
 
-  // Prefetch the user's custom icon library so `custom:<uuid>` references on
-  // already-saved canvases resolve to URLs immediately — don't wait for the
-  // Icons sidebar tab to be opened.
-  const loadCustomIcons = useCustomIconsStore((s) => s.load);
+  // Prefetch the user's uploaded images (`upload:<uuid>`) before the sidebar opens.
+  const loadCustomImages = useCustomImagesStore((s) => s.load);
   useEffect(() => {
-    loadCustomIcons();
-  }, [loadCustomIcons]);
+    loadCustomImages();
+  }, [loadCustomImages]);
 
   const searchParams = useSearchParams();
   const projectId = searchParams.get("id");

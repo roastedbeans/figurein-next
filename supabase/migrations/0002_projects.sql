@@ -26,19 +26,23 @@ create index if not exists projects_owner_id_updated_at_idx
 
 alter table public.projects enable row level security;
 
+drop policy if exists "projects_select_own" on public.projects;
 create policy "projects_select_own"
   on public.projects for select
   using (owner_id = auth.uid());
 
+drop policy if exists "projects_insert_own" on public.projects;
 create policy "projects_insert_own"
   on public.projects for insert
   with check (owner_id = auth.uid());
 
+drop policy if exists "projects_update_own" on public.projects;
 create policy "projects_update_own"
   on public.projects for update
   using (owner_id = auth.uid())
   with check (owner_id = auth.uid());
 
+drop policy if exists "projects_delete_own" on public.projects;
 create policy "projects_delete_own"
   on public.projects for delete
   using (owner_id = auth.uid());

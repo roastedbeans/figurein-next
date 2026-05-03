@@ -1,5 +1,22 @@
 export const CANVAS_WIDTH = 1200;
 export const CANVAS_HEIGHT = 800;
+
+/** Pan that centers the fixed artboard (`CANVAS_*`) in the viewport at the
+ *  given zoom — same math as the editor’s first paint (see Canvas mount). */
+export function centeredPanForViewport(
+  viewportWidth: number,
+  viewportHeight: number,
+  zoom: number
+): { panX: number; panY: number } {
+  if (viewportWidth <= 0 || viewportHeight <= 0) {
+    return { panX: 0, panY: 0 };
+  }
+  return {
+    panX: (viewportWidth - CANVAS_WIDTH * zoom) / 2,
+    panY: (viewportHeight - CANVAS_HEIGHT * zoom) / 2,
+  };
+}
+
 export const GRID_SIZE = 20;
 export const GRID_MAJOR = 5; // Major line every N minor lines (20*5 = 100px)
 /** Snap interval used for drag placement/resize. Number-field step values
@@ -13,7 +30,7 @@ export const HANDLE_SIZE = 8;
 
 export const DEFAULT_FILL = "#ffffff";
 export const DEFAULT_STROKE = "#1a1a1a";
-export const DEFAULT_STROKE_WIDTH = 2;
+export const DEFAULT_STROKE_WIDTH = 1;
 
 /** Fallback dimensions when the user places a shape with a single click
  *  (no drag). Rect/circle inflate to this box; lines/arrows extend this far

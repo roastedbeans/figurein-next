@@ -10,7 +10,8 @@ import { Input } from "@/components/ui/input";
 import { Replace, Search } from "lucide-react";
 import { useEditorStore } from "@/stores/editor-store";
 import { searchIcons, getIconUrl } from "@/components/icons";
-import { FLOWCHART_SHAPES } from "@/lib/flowchart-shapes";
+import { SHAPES } from "@/lib/shape-stencils";
+import { ShapePathPreview } from "@/components/editor/shape-path-preview";
 import type { EditorElement } from "@/types/editor";
 import { cn } from "@/lib/utils";
 
@@ -50,32 +51,6 @@ function Tile({ active, label, onClick, children }: TileProps) {
     >
       {children}
     </button>
-  );
-}
-
-function ShapeTilePreview({
-  viewBox,
-  pathData,
-}: {
-  viewBox: string;
-  pathData: string;
-}) {
-  return (
-    <svg
-      viewBox={viewBox}
-      preserveAspectRatio="xMidYMid meet"
-      className="pointer-events-none size-7 text-foreground"
-      aria-hidden
-    >
-      <path
-        d={pathData}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={3}
-        strokeLinejoin="round"
-        strokeLinecap="round"
-      />
-    </svg>
   );
 }
 
@@ -163,24 +138,22 @@ export function ReplacePopover({ element }: { element: EditorElement }) {
                   />
                 </svg>
               </Tile>
-              {FLOWCHART_SHAPES.map((shape) => (
+              {SHAPES.map((shape) => (
                 <Tile
                   key={shape.id}
                   active={currentPathData === shape.pathData}
                   label={shape.label}
                   onClick={() => {
                     replaceElement(element.id, {
-                      kind: "flowchart",
+                      kind: "stencil",
                       pathData: shape.pathData,
                       viewBox: shape.viewBox,
+                      shapeId: shape.id,
                     });
                     close();
                   }}
                 >
-                  <ShapeTilePreview
-                    viewBox={shape.viewBox}
-                    pathData={shape.pathData}
-                  />
+                  <ShapePathPreview shape={shape} className="size-7" />
                 </Tile>
               ))}
             </div>

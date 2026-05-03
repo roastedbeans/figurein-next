@@ -13,7 +13,6 @@ import { useShallow } from "zustand/react/shallow";
 import {
   elementById,
   sortedElementIds,
-  stableTileBounds,
   useEditorStore,
 } from "@/stores/editor-store";
 import { CanvasElement } from "./CanvasElement";
@@ -21,114 +20,63 @@ import { SelectionHandles } from "./SelectionHandles";
 import { useCanvasInteraction } from "@/hooks/use-canvas-interaction";
 import { TextFormatToolbar } from "./TextFormatToolbar";
 import { buildPath } from "./elements/ArrowElement";
-import type { ArrowElement as ArrowElementType, EditorElement } from "@/types/editor";
 import {
-  CANVAS_WIDTH,
-  CANVAS_HEIGHT,
+  resolveConnectorEndpoints,
+  resolveConnectorWithMap,
+} from "@/lib/connector-geometry";
+import { resolvePathElementGeometry } from "@/lib/path-element-geometry";
+import type {
+  ArrowElement as ArrowElementType,
+  EditorElement,
+} from "@/types/editor";
+import {
   GRID_SIZE,
   GRID_MAJOR,
+  centeredPanForViewport,
 } from "@/lib/constants";
 import { DEFAULT_STROKE } from "@/lib/constants";
+import {
+  dimensionsForCustomImageElement,
+  isUploadImageId,
+  uuidFromUploadImageId,
+} from "@/lib/user-images";
+import { useCustomImagesStore } from "@/stores/custom-images-store";
 
-/** Build grid line arrays once (they never change). */
-function buildGridLines() {
-  const minor: { x1: number; y1: number; x2: number; y2: number }[] = [];
-  const major: { x1: number; y1: number; x2: number; y2: number }[] = [];
-  const majorStep = GRID_SIZE * GRID_MAJOR;
-
-  // Vertical lines
-  for (let x = GRID_SIZE; x < CANVAS_WIDTH; x += GRID_SIZE) {
-    const isMajor = x % majorStep === 0;
-    (isMajor ? major : minor).push({ x1: x, y1: 0, x2: x, y2: CANVAS_HEIGHT });
-  }
-  // Horizontal lines
-  for (let y = GRID_SIZE; y < CANVAS_HEIGHT; y += GRID_SIZE) {
-    const isMajor = y % majorStep === 0;
-    (isMajor ? major : minor).push({ x1: 0, y1: y, x2: CANVAS_WIDTH, y2: y });
-  }
-  return { minor, major };
-}
-
-const GRID_LINES = buildGridLines();
-
-/** Tile + grid background, extracted so React.memo can keep its ~3200 grid
- *  `<line>` elements out of reconciliation whenever the Canvas re-renders
- *  for reasons that don't affect them (pan, hover, selection, marquee).
- *  Props are chosen so that pure pan keeps the tuple === across renders:
- *  `tiles` and `tileRange` are memoized refs on `elements`, and `zoom` /
- *  `gridOpacity` only change on wheel + grid toggle. */
-const TileLayer = memo(function TileLayer({
-  tiles,
-  tileRange,
-  zoom,
-  gridOpacity,
-}: {
-  tiles: { i: number; j: number }[];
-  tileRange: { iMin: number; iMax: number; jMin: number; jMax: number };
-  zoom: number;
-  gridOpacity: number;
-}) {
+/** Seamless infinite grid rendered via SVG `<pattern>`. Two nested patterns
+ *  define minor lines (every GRID_SIZE) and major lines (every GRID_SIZE *
+ *  GRID_MAJOR). A single large `<rect>` fills the whole coordinate space —
+ *  the browser tiles the pattern natively so there are no per-line DOM nodes.
+ *  `patternUnits="userSpaceOnUse"` keeps the grid pinned to canvas coords,
+ *  so it scrolls and scales correctly with pan/zoom. */
+function InfiniteGrid({ opacity }: { opacity: number }) {
+  if (opacity <= 0) return null;
+  const minor = GRID_SIZE;
+  const major = GRID_SIZE * GRID_MAJOR;
   return (
-    <>
-      {/* Single shadow for the UNION of all tiles. `data-sheet-shadow` is
-          targeted by globals.css to drop the filter during `is-panning`,
-          since feDropShadow blocks GPU layer promotion of the pan <g>. */}
-      <rect
-        data-no-export
-        data-sheet-shadow="1"
-        x={tileRange.iMin * CANVAS_WIDTH}
-        y={tileRange.jMin * CANVAS_HEIGHT}
-        width={(tileRange.iMax - tileRange.iMin + 1) * CANVAS_WIDTH}
-        height={(tileRange.jMax - tileRange.jMin + 1) * CANVAS_HEIGHT}
-        fill="white"
-        filter="url(#figurein-sheet-shadow)"
-      />
-      {tiles.map(({ i, j }) => (
-        <g
-          key={`${i}:${j}`}
-          transform={`translate(${i * CANVAS_WIDTH}, ${j * CANVAS_HEIGHT})`}
-          data-no-export
-        >
-          <rect
-            x={0}
-            y={0}
-            width={CANVAS_WIDTH}
-            height={CANVAS_HEIGHT}
-            fill="white"
-            stroke="hsl(0 0% 86%)"
-            strokeWidth={1 / zoom}
+    <g data-no-export opacity={opacity}>
+      <defs>
+        <pattern id="fg-minor" width={minor} height={minor} patternUnits="userSpaceOnUse">
+          <path
+            d={`M ${minor} 0 L 0 0 0 ${minor}`}
+            fill="none"
+            stroke="hsl(0 0% 91%)"
+            strokeWidth={0.5}
           />
-          {gridOpacity > 0 && (
-            <g opacity={gridOpacity}>
-              {GRID_LINES.minor.map((l, idx) => (
-                <line
-                  key={`m${idx}`}
-                  x1={l.x1}
-                  y1={l.y1}
-                  x2={l.x2}
-                  y2={l.y2}
-                  stroke="hsl(0 0% 92%)"
-                  strokeWidth={0.5}
-                />
-              ))}
-              {GRID_LINES.major.map((l, idx) => (
-                <line
-                  key={`M${idx}`}
-                  x1={l.x1}
-                  y1={l.y1}
-                  x2={l.x2}
-                  y2={l.y2}
-                  stroke="hsl(0 0% 85%)"
-                  strokeWidth={0.5}
-                />
-              ))}
-            </g>
-          )}
-        </g>
-      ))}
-    </>
+        </pattern>
+        <pattern id="fg-major" width={major} height={major} patternUnits="userSpaceOnUse">
+          <rect width={major} height={major} fill="url(#fg-minor)" />
+          <path
+            d={`M ${major} 0 L 0 0 0 ${major}`}
+            fill="none"
+            stroke="hsl(0 0% 84%)"
+            strokeWidth={0.5}
+          />
+        </pattern>
+      </defs>
+      <rect x={-100000} y={-100000} width={200000} height={200000} fill="url(#fg-major)" />
+    </g>
   );
-});
+}
 
 /** Screen-space "Editing group" badge. Subscribes to canvas on its own so
  *  the parent Canvas can skip canvas from its main subscription — only this
@@ -193,44 +141,111 @@ function GenerationOverlay() {
   );
 }
 
-/** Blue outline + drop-shadow overlay used for both hover and snap-target
- *  states. For line/arrow, draws a thin glow stroke just outside the path;
- *  otherwise draws a rounded-rect outline inflated so it sits outside the
- *  element's own border (instead of overlapping it). */
-const ElementHighlight = memo(function ElementHighlight({ element }: { element: EditorElement }) {
-  const HIGHLIGHT = "hsl(221 83% 53%)";
-  const SHADOW_FILTER = "drop-shadow(0 3px 8px hsl(221 83% 53% / 0.45))";
-  const STROKE_W = 1;
+const HIGHLIGHT = "hsl(221 83% 53%)";
+const HIGHLIGHT_SHADOW = "drop-shadow(0 3px 8px hsl(221 83% 53% / 0.45))";
+const HIGHLIGHT_STROKE = 1;
 
-  if (element.type === "line" || element.type === "arrow") {
-    const d = buildPath(element as ArrowElementType);
-    // Sit flush outside the element's own stroke so they don't overlap.
-    const offset = element.strokeWidth / 2 + STROKE_W / 2;
+/** Connector-specific highlight. Subscribes to the connector's bound elements
+ *  the SAME WAY ArrowElement does — same selector, same `resolveConnectorEndpoints`
+ *  call signature — so the visible arrow and the highlight outline render
+ *  from bit-identical resolved geometry. Any divergence between the two
+ *  would mean a hovered/selected arrow whose blue glow drifts off the
+ *  rendered arrow path, which is the bug we just hit. Treat this function
+ *  and ArrowElementImpl as a matched pair: changes here must mirror over. */
+const ConnectorHighlight = memo(function ConnectorHighlight({
+  element,
+}: {
+  element: ArrowElementType;
+}) {
+  const startBound = useEditorStore((s) =>
+    element.startConnectedTo
+      ? elementById(s.elements, element.startConnectedTo) ?? null
+      : null
+  );
+  const endBound = useEditorStore((s) =>
+    element.endConnectedTo
+      ? elementById(s.elements, element.endConnectedTo) ?? null
+      : null
+  );
+  const resolved = resolveConnectorEndpoints(element, startBound, endBound);
+  const d = buildPath(resolved as ArrowElementType);
+  const offset = resolved.strokeWidth / 2 + HIGHLIGHT_STROKE / 2;
+  return (
+    <path
+      data-no-export
+      d={d}
+      fill="none"
+      stroke={HIGHLIGHT}
+      strokeWidth={resolved.strokeWidth + offset * 2}
+      strokeLinecap="butt"
+      strokeLinejoin="miter"
+      opacity={0.35}
+      pointerEvents="none"
+      style={{ filter: HIGHLIGHT_SHADOW }}
+    />
+  );
+});
+
+/** Blue outline + drop-shadow overlay used for both hover and snap-target
+ *  states. For line/arrow, defers to ConnectorHighlight (which resolves
+ *  bindings); otherwise draws a rounded-rect outline inflated so it sits
+ *  outside the element's own border (instead of overlapping it). */
+const ElementHighlight = memo(function ElementHighlight({ element }: { element: EditorElement }) {
+  if (element.type === "arrow") {
+    return <ConnectorHighlight element={element as ArrowElementType} />;
+  }
+
+  const pad = element.strokeWidth / 2 + HIGHLIGHT_STROKE / 2;
+  const rotateTransform = element.rotation
+    ? `rotate(${element.rotation} ${element.x + element.width / 2} ${element.y + element.height / 2})`
+    : undefined;
+
+  if (element.type === "path") {
+    const { viewBox, pathD, overlayD } = resolvePathElementGeometry(element);
+    const pathStroke = element.strokeWidth + pad * 2;
     return (
-      <path
-        data-no-export
-        d={d}
-        fill="none"
-        stroke={HIGHLIGHT}
-        strokeWidth={element.strokeWidth + offset * 2}
-        strokeLinecap="butt"
-        strokeLinejoin="miter"
-        opacity={0.35}
-        pointerEvents="none"
-        style={{ filter: SHADOW_FILTER }}
-      />
+      <g transform={rotateTransform}>
+        <svg
+          data-no-export
+          x={element.x}
+          y={element.y}
+          width={element.width}
+          height={element.height}
+          viewBox={viewBox}
+          preserveAspectRatio="none"
+          overflow="visible"
+          opacity={0.35}
+          pointerEvents="none"
+          style={{ filter: HIGHLIGHT_SHADOW }}
+        >
+          <path
+            d={pathD}
+            fill="none"
+            stroke={HIGHLIGHT}
+            strokeWidth={pathStroke}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            vectorEffect="non-scaling-stroke"
+          />
+          {overlayD && (
+            <path
+              d={overlayD}
+              fill="none"
+              stroke={HIGHLIGHT}
+              strokeWidth={pathStroke}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              vectorEffect="non-scaling-stroke"
+            />
+          )}
+        </svg>
+      </g>
     );
   }
 
   // Inflate the overlay rect by half the element's stroke plus half the
   // highlight stroke so the highlight sits flush on the outside of the
   // element's border, not centered on it and with no visible gap.
-  const pad = element.strokeWidth / 2 + STROKE_W / 2;
-  // Match the element's own rotation so the hover outline tracks the
-  // rendered shape, not its axis-aligned bbox.
-  const rotateTransform = element.rotation
-    ? `rotate(${element.rotation} ${element.x + element.width / 2} ${element.y + element.height / 2})`
-    : undefined;
   return (
     <rect
       data-no-export
@@ -240,18 +255,22 @@ const ElementHighlight = memo(function ElementHighlight({ element }: { element: 
       height={element.height + pad * 2}
       fill="none"
       stroke={HIGHLIGHT}
-      strokeWidth={STROKE_W}
+      strokeWidth={HIGHLIGHT_STROKE}
       pointerEvents="none"
       transform={rotateTransform}
-      style={{ filter: SHADOW_FILTER }}
+      style={{ filter: HIGHLIGHT_SHADOW }}
     />
   );
 });
 
 /** Tight axis-aligned bbox of a set of elements (lines/arrows use both
- *  endpoints and any elbow corners). Returns null for empty input. */
+ *  endpoints and any elbow corners). Connector endpoints are resolved
+ *  through `elementsById` so a bound arrow's bbox tracks its target's
+ *  current position, not the stale stored coords. Returns null for empty
+ *  input. */
 function groupBBox(
-  members: EditorElement[]
+  members: EditorElement[],
+  elementsById: Map<string, EditorElement>
 ): { x: number; y: number; w: number; h: number } | null {
   if (members.length === 0) return null;
   let minX = Infinity;
@@ -259,22 +278,22 @@ function groupBBox(
   let maxX = -Infinity;
   let maxY = -Infinity;
   for (const el of members) {
-    if (el.type === "line" || el.type === "arrow") {
-      const c = el as EditorElement & {
-        x2: number;
-        y2: number;
-        elbowCorners?: [number, number][];
-      };
-      if (c.x < minX) minX = c.x;
-      if (c.y < minY) minY = c.y;
-      if (c.x > maxX) maxX = c.x;
-      if (c.y > maxY) maxY = c.y;
-      if (c.x2 < minX) minX = c.x2;
-      if (c.y2 < minY) minY = c.y2;
-      if (c.x2 > maxX) maxX = c.x2;
-      if (c.y2 > maxY) maxY = c.y2;
-      if (c.elbowCorners) {
-        for (const [cx, cy] of c.elbowCorners) {
+    if (el.type === "arrow") {
+      const r = resolveConnectorWithMap(
+        el as ArrowElementType,
+        elementsById
+      );
+      const corners = (r as ArrowElementType).elbowCorners;
+      if (r.x < minX) minX = r.x;
+      if (r.y < minY) minY = r.y;
+      if (r.x > maxX) maxX = r.x;
+      if (r.y > maxY) maxY = r.y;
+      if (r.x2 < minX) minX = r.x2;
+      if (r.y2 < minY) minY = r.y2;
+      if (r.x2 > maxX) maxX = r.x2;
+      if (r.y2 > maxY) maxY = r.y2;
+      if (corners) {
+        for (const [cx, cy] of corners) {
           if (cx < minX) minX = cx;
           if (cy < minY) minY = cy;
           if (cx > maxX) maxX = cx;
@@ -330,15 +349,12 @@ export function Canvas() {
   // elements are added/removed or their zIndex changes. Keeps Canvas out
   // of the re-render path for position/content mutations.
   const sortedIds = useEditorStore((s) => sortedElementIds(s.elements));
-  // Tile range, also stable-ref — only bumps when an element spills past a
-  // new tile boundary, which is rare compared to drag frequency.
-  const tileRange = useEditorStore((s) => stableTileBounds(s.elements));
   // Per-element subscriptions for the derived highlight/selection UI. Each
   // returns a stable ref when the relevant element hasn't changed, so the
-  // Canvas only re-renders when one of these specific elements is touched.
-  const selectedElement = useEditorStore((s) =>
-    s.selectedElementId ? elementById(s.elements, s.selectedElementId) ?? null : null
-  );
+  // Only track the id — element position changes on every drag frame, and
+  // SelectionHandles owns its own subscription to the element data, so Canvas
+  // doesn't need to re-render on every position update.
+  const selectedElementId = useEditorStore((s) => s.selectedElementId);
   const snapTargetElement = useEditorStore((s) =>
     s.snapTargetId ? elementById(s.elements, s.snapTargetId) ?? null : null
   );
@@ -395,8 +411,7 @@ export function Canvas() {
     // call would be a clamp no-op.
     setViewportSize(width, height);
     const z = useEditorStore.getState().canvas.zoom;
-    const panX = (width - CANVAS_WIDTH * z) / 2;
-    const panY = (height - CANVAS_HEIGHT * z) / 2;
+    const { panX, panY } = centeredPanForViewport(width, height, z);
     setPan(panX, panY);
     setCentered(true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -425,9 +440,9 @@ export function Canvas() {
   // in paint, not handlers. Writing to `style.transform` (with the
   // `will-change: transform` hint below) lets the browser hoist the <g>
   // onto its own GPU layer so pans become compositor-only translations,
-  // skipping the CPU rasterize of ~3200 grid lines + feDropShadow every
-  // frame. `useLayoutEffect` runs pre-paint so the initial transform
-  // lands on frame 1 (no flash).
+  // skipping the CPU rasterize of ~3200 grid lines every frame.
+  // `useLayoutEffect` runs pre-paint so the initial transform lands on
+  // frame 1 (no flash).
   useLayoutEffect(() => {
     const apply = (state: ReturnType<typeof useEditorStore.getState>) => {
       const g = gRef.current;
@@ -441,30 +456,28 @@ export function Canvas() {
     });
   }, []);
 
-  // Auto-tile layout: turn the range into an explicit tile list. Depends
-  // solely on `tileRange` (stable-ref) so this memo only re-runs when tiles
-  // actually change — not on every element mutation.
-  const tiles = useMemo(() => {
-    const out: { i: number; j: number }[] = [];
-    for (let j = tileRange.jMin; j <= tileRange.jMax; j++) {
-      for (let i = tileRange.iMin; i <= tileRange.iMax; i++) {
-        out.push({ i, j });
-      }
-    }
-    return out;
-  }, [tileRange]);
-  const editingGroupBox = useMemo(
-    () => (editingGroupMembers.length > 0 ? groupBBox(editingGroupMembers) : null),
-    [editingGroupMembers]
-  );
+  const editingGroupBox = useMemo(() => {
+    if (editingGroupMembers.length === 0) return null;
+    // Imperative read — we do NOT want Canvas subscribing to the full
+    // elements array (would re-render on every drag frame). Pulling the
+    // current snapshot here is fine because `editingGroupMembers` already
+    // re-fires whenever any member's reference flips, which is the only
+    // scenario that can move the bbox edges.
+    const snap = useEditorStore.getState().elements;
+    const byId = new Map<string, EditorElement>();
+    for (const e of snap) byId.set(e.id, e);
+    return groupBBox(editingGroupMembers, byId);
+  }, [editingGroupMembers]);
 
   const { handlers } = useCanvasInteraction(svgRef);
 
-  // Icons still use the HTML5 drag-and-drop API (IconsPanel). Shapes use a
-  // custom press-and-drag in ShapesPanel that writes directly to the store,
-  // so no canvas drop handler is needed for them.
+  // Icons and Images use HTML5 drag-and-drop from their sidebar strips.
   const onDragOver = useCallback((e: React.DragEvent) => {
-    if (e.dataTransfer.types.includes("application/figurein-icon")) {
+    const t = e.dataTransfer.types;
+    if (
+      t.includes("application/figurin-icon") ||
+      t.includes("application/figurin-image")
+    ) {
       e.preventDefault();
       e.dataTransfer.dropEffect = "copy";
     }
@@ -475,8 +488,15 @@ export function Canvas() {
       const svg = svgRef.current;
       if (!svg) return;
 
-      const iconId = e.dataTransfer.getData("application/figurein-icon");
-      if (!iconId) return;
+      const iconId = e.dataTransfer.getData("application/figurin-icon");
+      const imageIdPayloadRaw = e.dataTransfer.getData("application/figurin-image");
+
+      const imageIdPayload =
+        imageIdPayloadRaw && isUploadImageId(imageIdPayloadRaw)
+          ? imageIdPayloadRaw
+          : null;
+
+      if (!iconId && !imageIdPayload) return;
       e.preventDefault();
 
       const state = useEditorStore.getState();
@@ -488,9 +508,39 @@ export function Canvas() {
       const snapX = Math.round(rawX / snapSize) * snapSize;
       const snapY = Math.round(rawY / snapSize) * snapSize;
 
-      const id = Math.random().toString(36).substring(2, 11);
+      if (imageIdPayload) {
+        const uuid = uuidFromUploadImageId(imageIdPayload);
+        const entry = useCustomImagesStore.getState().getById(uuid);
+        const { width: w, height: h } = dimensionsForCustomImageElement(
+          entry?.width ?? null,
+          entry?.height ?? null
+        );
+        const id = Math.random().toString(36).substring(2, 11);
+        addElement({
+          id,
+          parentId: null,
+          type: "image",
+          x: snapX - w / 2,
+          y: snapY - h / 2,
+          width: w,
+          height: h,
+          rotation: 0,
+          fill: "none",
+          stroke: "none",
+          strokeWidth: 0,
+          opacity: 1,
+          zIndex: state.elements.length,
+          imageId: imageIdPayload,
+        });
+        selectElement(id);
+        return;
+      }
+
+      if (!iconId) return;
+
+      const idIcon = Math.random().toString(36).substring(2, 11);
       addElement({
-        id,
+        id: idIcon,
         parentId: null,
         type: "icon",
         x: snapX - 30,
@@ -506,7 +556,7 @@ export function Canvas() {
         iconId,
         color: DEFAULT_STROKE,
       });
-      selectElement(id);
+      selectElement(idIcon);
     },
     [addElement, selectElement]
   );
@@ -525,7 +575,7 @@ export function Canvas() {
     <div className="relative h-full w-full">
     <svg
       ref={svgRef}
-      id="figurein-canvas"
+      id="figurin-canvas"
       className="h-full w-full cursor-crosshair select-none"
       style={{
         WebkitUserSelect: "none",
@@ -535,41 +585,8 @@ export function Canvas() {
       onDragOver={onDragOver}
       onDrop={onDrop}
     >
-      {/* Canvas-sheet drop shadow. Two stacked feDropShadows create Apple-style
-          layered depth: a tight contact shadow + a wider ambient cast. Both are
-          marked data-no-export so they're stripped from PNG/SVG exports. */}
-      <defs data-no-export>
-        <filter
-          id="figurein-sheet-shadow"
-          x="-5%"
-          y="-5%"
-          width="110%"
-          height="115%"
-        >
-          {/* Clamp dy/stdDeviation: at low zoom the scaled values explode
-              (e.g. 180 at zoom 0.1), and feDropShadow convolution cost grows
-              with the blur radius on a union-of-tiles rect that can be many
-              thousands of user units wide. Cap keeps pan/zoom smooth. */}
-          <feDropShadow
-            dx="0"
-            dy={Math.min(1 / zoom, 4)}
-            stdDeviation={Math.min(2 / zoom, 8)}
-            floodColor="rgb(0 0 0)"
-            floodOpacity="0.06"
-          />
-          <feDropShadow
-            dx="0"
-            dy={Math.min(8 / zoom, 24)}
-            stdDeviation={Math.min(18 / zoom, 36)}
-            floodColor="rgb(0 0 0)"
-            floodOpacity="0.14"
-          />
-        </filter>
-      </defs>
-
-      {/* Neutral backdrop — slightly darker than the sheet so the drop shadow
-          reads clearly. macOS-chrome gray. */}
-      <rect width="100%" height="100%" fill="hsl(220 13% 93%)" data-no-export />
+      {/* Neutral backdrop — almost white with a faint warm hint. */}
+      <rect width="100%" height="100%" fill="hsl(220 20% 97%)" data-no-export />
 
       {/* Canvas area — no marker defs needed; arrowheads are drawn inline.
           Transform is applied imperatively via `gRef` (see effect below) so
@@ -582,14 +599,7 @@ export function Canvas() {
         ref={gRef}
         style={{ willChange: "transform", transformOrigin: "0 0" }}
       >
-        {/* Tile sheets + grid — memoized so pan doesn't re-reconcile the
-            3200+ grid <line> elements every frame. */}
-        <TileLayer
-          tiles={tiles}
-          tileRange={tileRange}
-          zoom={zoom}
-          gridOpacity={gridOpacity}
-        />
+        <InfiniteGrid opacity={gridOpacity} />
 
         {/* Elements — iterated by id so Canvas re-renders only on structure
             changes (add/delete/zIndex reshuffle). Each child subscribes to
@@ -612,9 +622,11 @@ export function Canvas() {
           <ElementHighlight key={`ms-${el.id}`} element={el} />
         ))}
 
-        {/* Selection handles — only when exactly one element is selected. */}
-        {selectedElement && multiSelected.length === 0 && (
-          <SelectionHandles element={selectedElement} />
+        {/* Selection handles — only when exactly one element is selected.
+            SelectionHandles subscribes to its own element data so Canvas
+            doesn't re-render on every drag-frame position update. */}
+        {selectedElementId && multiSelected.length === 0 && (
+          <SelectionHandles id={selectedElementId} />
         )}
 
         {/* Marquee selection rect — drawn while the user is dragging across

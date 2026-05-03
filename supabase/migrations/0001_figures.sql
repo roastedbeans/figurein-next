@@ -22,19 +22,23 @@ create index if not exists figures_owner_id_updated_at_idx
 alter table public.figures enable row level security;
 
 -- Owner-only access. Add collaborator policies when sharing ships.
+drop policy if exists "figures_select_own" on public.figures;
 create policy "figures_select_own"
   on public.figures for select
   using (owner_id = auth.uid());
 
+drop policy if exists "figures_insert_own" on public.figures;
 create policy "figures_insert_own"
   on public.figures for insert
   with check (owner_id = auth.uid());
 
+drop policy if exists "figures_update_own" on public.figures;
 create policy "figures_update_own"
   on public.figures for update
   using (owner_id = auth.uid())
   with check (owner_id = auth.uid());
 
+drop policy if exists "figures_delete_own" on public.figures;
 create policy "figures_delete_own"
   on public.figures for delete
   using (owner_id = auth.uid());

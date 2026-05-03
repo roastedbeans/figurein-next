@@ -64,6 +64,7 @@ export function FrameElement({ element }: { element: FrameElementType }) {
           strokeWidth={hasStroke ? element.strokeWidth : 0}
           strokeDasharray={dashArray}
           strokeLinecap={strokeLineCap(element.strokeStyle)}
+          vectorEffect="non-scaling-stroke"
           opacity={element.opacity}
           style={{ pointerEvents: "none" }}
         />

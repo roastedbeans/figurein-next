@@ -1,4 +1,4 @@
-# FigureIn Research: Scientific Figure Generation Architecture
+# FigurIn Research: Scientific Figure Generation Architecture
 
 ## FigureLabs (figurelabs.ai)
 
@@ -57,7 +57,7 @@ SVG and HTML elements rendered directly in the DOM. Simplest approach — you ge
 
 WebGL rendering for performance at scale with GLSL shaders, while maintaining a React component model for the UI layer.
 
-### Recommendation for FigureIn
+### Recommendation for FigurIn
 
 **Start with SVG DOM rendering.** Scientific figures typically contain hundreds (not millions) of elements. SVG gives native text handling, easy export to PDF/publication formats, CSS-based theming, and direct element addressability. Migrate to Canvas if performance becomes an issue while keeping SVG as the serialization format.
 
@@ -116,7 +116,7 @@ State must stay JSON-serializable. Store shapes as plain objects with `type`, `p
 
 ---
 
-## Recommended Libraries for FigureIn
+## Recommended Libraries for FigurIn
 
 | Purpose | Library | Why |
 | --- | --- | --- |
@@ -172,7 +172,7 @@ src/
 **FigureLabs** = AI-only generation, no post-generation editing canvas.
 **BioRender** = Manual drag-and-drop only, slow, expensive, biology-only.
 
-**FigureIn** can combine:
+**FigurIn** can combine:
 
 - AI-powered figure generation (text/sketch -> editable figure)
 - A proper editable SVG canvas for post-generation refinement

@@ -3,7 +3,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "FigureIn — Scientific Figure Editor",
+  title: "FigurIn — Scientific Figure Editor",
   description:
     "Create publication-ready scientific figures with AI-powered generation and an intuitive editor.",
 };

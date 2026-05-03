@@ -224,6 +224,35 @@ Use the SAME planning-table value for (a) the element's \`height\` field AND (b)
 - Sequence-diagram override (detected automatically when ≥2 vertical lifelines are present): the x-column check is DROPPED so a side note on one actor's column still shifts every message row below it — preserves emission order across columns. Lifeline endpoints are checked per-endpoint: top stays anchored on the actor head, bottom extends to cover the grown content.`;
 }
 
+function themeTokens(): string {
+  return `## Theme Tokens
+
+Anywhere a color is accepted (\`fill\`, \`stroke\`, \`color\`), prefer a named token over raw hex. The server resolves tokens to hex; raw hex still works for one-off colors that aren't in the palette.
+
+**Typography**
+- \`text\` (#1e293b) — default heading / subheading / body color.
+- \`text-muted\` (#64748b) — captions, secondary copy.
+- \`text-subtle\` (#94a3b8) — annotation labels, very low-emphasis text.
+
+**Surfaces (fills)**
+- \`surface\` (#ffffff) — default opaque fill for cards and pills on a white canvas.
+- \`surface-subtle\` (#f8fafc) — soft tinted section tile.
+- \`surface-muted\` (#f1f5f9) — slightly darker section tile.
+
+**Borders / strokes**
+- \`border\` (#cbd5e1) — neutral divider stroke.
+- \`border-strong\` (#475569) — emphasized outline.
+
+**Accents** (for highlights, semantic states, frame outlines)
+- Blue: \`blue\` (#3b82f6), \`blue-subtle\` (#93c5fd), \`blue-bg\` (#eff6ff)
+- Amber: \`amber\` (#f59e0b), \`amber-subtle\` (#fcd34d), \`amber-bg\` (#fef3c7)
+- Green: \`green\` (#22c55e), \`green-subtle\` (#86efac)
+- Red: \`red\` (#ef4444), \`red-subtle\` (#f9a8d4)
+- Purple: \`purple-subtle\` (#c4b5fd)
+
+Use \`-subtle\` variants for borders and section accents; full saturation for emphasis (semantic states, attack-path arrows). \`"none"\` is still valid where the field accepts it. Inline span colors inside text \`content\` (e.g. \`<span style="color:#22c55e">\`) keep using hex — token resolution applies to top-level fields only.`;
+}
+
 function elementTypeDocs(): string {
   return `## Element Type Reference
 
@@ -235,11 +264,22 @@ function elementTypeDocs(): string {
 \`{ "id", "type": "circle", "x", "y", "width", "height", "rotation": 0, "fill", "stroke", "strokeWidth", "opacity": 1, "zIndex", "aspectLocked": true }\`
 width MUST equal height. Emit them equal; the post-processor widens the shorter side if not.
 
-### Line / Arrow (connectors)
-\`{ "id", "type": "arrow", "x", "y", "x2", "y2", "width": 0, "height": 0, "rotation": 0, "fill": "none", "stroke": "<hex>", "strokeWidth": 2, "opacity": 1, "zIndex", "headStyle": "triangle"|"open"|"none", "tailStyle": "none"|"triangle"|"open", "lineStyle": "straight"|"curved"|"elbow", "sourceLabel"?: "<string>", "label"?: "<string>", "targetLabel"?: "<string>" }\`
-\`{ "id", "type": "line", "x", "y", "x2", "y2", "width": 0, "height": 0, "rotation": 0, "fill": "none", "stroke": "<hex>", "strokeWidth": 2, "opacity": 1, "zIndex", "headStyle": "none", "tailStyle": "none", "lineStyle": "straight"|"curved"|"elbow", "label"?: "<string>" }\`
-- "arrow" = directional (default headStyle "triangle"). "line" = non-directional (default headStyle "none").
-- Both support the same lineStyle / headStyle / tailStyle.
+### Connector (arrow)
+\`{ "id", "type": "arrow", "from": "<id>", "to": "<id>", "fromSide"?: "up"|"right"|"down"|"left", "toSide"?: "up"|"right"|"down"|"left", "preset"?: "flow"|"sequence"|"data"|"annotation", "rotation": 0, "zIndex", "sourceLabel"?: "<string>", "label"?: "<string>", "targetLabel"?: "<string>" }\`
+
+There is ONE connector type: \`"arrow"\`. To draw a non-directional line, use \`"arrow"\` with \`headStyle: "none"\` and \`tailStyle: "none"\` (or pick a preset that has them set that way). The legacy \`"line"\` type no longer exists.
+
+- **Prefer \`from\` / \`to\`** referencing element ids over emitting raw \`x\` / \`y\` / \`x2\` / \`y2\` coordinates. The server resolves bindings to endpoints, sets the structural \`startConnectedTo\` / \`endConnectedTo\`, and the renderer reroutes the connector when the bound elements are moved or resized later. \`fromSide\` / \`toSide\` are optional — omit them and the server picks the closest pair (right→left for horizontal layouts, down→up for vertical). Specify them only when you need a specific edge (e.g. an elbow that must enter from the top).
+- Bindings to elements not in the same generation, or to other connectors, are not supported. Fall back to raw coordinates in those cases by emitting \`x\`, \`y\`, \`x2\`, \`y2\` directly.
+- Self-loops (an element looping back to itself) and free-floating arrows: emit raw \`x\` / \`y\` / \`x2\` / \`y2\` instead of \`from\` / \`to\`.
+- **Prefer \`preset\`** over emitting lineStyle / headStyle / tailStyle / strokeWidth / stroke individually. Presets are server-expanded into the full field cluster:
+  - \`flow\` — flowchart connector: elbow, triangle head, strokeWidth 1.5, stroke #475569.
+  - \`sequence\` — sequence-diagram message: straight, triangle head, strokeWidth 1.5, stroke #1e293b.
+  - \`data\` — data-flow arrow: straight, triangle head, strokeWidth 2, stroke #3b82f6 (blue).
+  - \`annotation\` — light annotation: curved, open head, strokeWidth 1, stroke #94a3b8.
+  Override individual fields when needed (e.g. \`{ "preset": "flow", "stroke": "#ef4444" }\` for a red attack-path arrow). Any individual field you emit wins over the preset.
+- Without a preset, emit the full cluster: \`lineStyle\` (straight | curved | elbow), \`headStyle\` (triangle | open | none), \`tailStyle\` (none | triangle | open), \`strokeWidth\`, \`stroke\`.
+- Default \`headStyle\` is \`"triangle"\` (directional arrow). For a non-directional line, set \`headStyle: "none"\` and \`tailStyle: "none"\` explicitly.
 - Endpoints sit ON an element edge — see Position Planning Step E. The server auto-fills startDir / endDir AND startConnectedTo / endConnectedTo from coordinates: when an endpoint lands within one grid tick of an element edge, the server records the element id as the binding so the renderer reroutes the connector when its target is moved or resized later. You don't need to do anything to opt in — emit the endpoint coords on the edge and the binding is set for you.
 - NEVER emit startConnectedTo / endConnectedTo / cx / cy / elbowCorners yourself. Those are server- or editor-managed (bindings filled in post-snap; cx/cy and elbowCorners are interactive-editor state for curve control points and custom elbow bends). The renderer auto-routes curves and elbow corners from the endpoints + startDir / endDir.
 - rotation is always 0 for lines/arrows. The visible angle is derived from (x, y) → (x2, y2); set it with the endpoints, not a rotation field.
@@ -286,7 +326,7 @@ A frame is a NAMED SECTION of the figure. It groups related children under one p
 
 How to wire up children: emit each child with \`parentId\` set to the frame's id. The server derives the frame's childIds from those references — **DO NOT emit childIds on the frame yourself**. Children keep using ABSOLUTE canvas coordinates (frame.x/y/width/height is the container; child.x/y is still in page space, not frame-relative).
 
-Do NOT emit layoutMode, gap, padding, mainAxisAlign, or crossAxisAlign — the server fills those with inert defaults and the renderer ignores them today.
+Do NOT emit \`layoutMode\`, \`gap\`, \`padding\`, \`mainAxisAlign\`, or \`crossAxisAlign\` — those fields are no longer used. Position each child explicitly with absolute \`x\` / \`y\` based on the figure layout you've planned.
 
 Frame styling:
 - fill "none" + stroke "<hex>" + borderRadius 10: classic outline section (replaces the old "rectangle L1 container + separate label" pattern).
@@ -317,7 +357,7 @@ Path examples (tight viewBox + matching aspect ratios):
 Frames turn a flat element list into a TREE. Use them to carve a figure into named sections (one frame per phase / lane / group of related assets) so the structure of your figure is legible from the JSON alone.
 
 Rules:
-1. Only a \`type: "frame"\` element can be a parent. Primitives (rect, circle, text, icon, path, line, arrow) cannot hold children.
+1. Only a \`type: "frame"\` element can be a parent. Primitives (rect, circle, text, icon, path, arrow) cannot hold children.
 2. Every non-root element sets \`parentId\` to an existing frame's id. Everything else omits \`parentId\` (or sets it to \`null\`) — those render at page root.
 3. The frame's \`childIds\` is derived server-side from children's \`parentId\`. **DO NOT emit childIds yourself.**
 4. Children use ABSOLUTE canvas coordinates (current step). Frame.x / frame.y is the visible bounding box of the section; child.x / child.y are still in page space. A child sitting at frame.x + 20, frame.y + 40 is 20px inside the frame's left edge, 40px inside the top. Do NOT use frame-relative offsets.
@@ -450,7 +490,7 @@ ONE text element, always. The text element's own fill / stroke / strokeWidth / b
 - Text + lifeline share groupId.
 - **Snapped edge to lifeline:** \`lifeline.y = text.y + planned_head_height\` (same value you emitted as the head text's \`height\`). Edge-snap + cascade reflow absorb any plan-vs-measured drift.
 
-**Lifeline (MANDATORY for both forms — one per actor, no exceptions)**: type "line" (NOT "arrow"), zIndex 11. \`x = x2 = lifeline_x[i]\` (EXACTLY — both endpoints snap to the anchor, no drift). \`y\` sits on the actor head's bottom edge using the planning table (Form A caption 1-line → label.y + 25; Form B body 1-line → text.y + 30, 2-line → text.y + 50). \`y2 = round_to_5(last_message_y + 40)\` (or past the last attached note, whichever is lower). lineStyle "straight", headStyle "none", tailStyle "none". Stroke color and strokeWidth copied from the sketch, or a neutral muted stroke if the sketch is stylized.
+**Lifeline (MANDATORY for both forms — one per actor, no exceptions)**: type "arrow" with \`headStyle: "none"\` and \`tailStyle: "none"\` (the headless form is what reads as a "line"), zIndex 11. \`x = x2 = lifeline_x[i]\` (EXACTLY — both endpoints snap to the anchor, no drift). \`y\` sits on the actor head's bottom edge using the planning table (Form A caption 1-line → label.y + 25; Form B body 1-line → text.y + 30, 2-line → text.y + 50). \`y2 = round_to_5(last_message_y + 40)\` (or past the last attached note, whichever is lower). lineStyle "straight". Stroke color and strokeWidth copied from the sketch, or a neutral muted stroke if the sketch is stylized.
   - Without the lifeline, messages read as disconnected floating arrows. If you emit N actors, you MUST emit N lifeline \`line\` elements.
 
 ### 3. Messages (horizontal arrows between lifelines)
@@ -689,21 +729,22 @@ For flowcharts, process diagrams, data-flow diagrams, or decision/action sequenc
 
 | label               | id                  | viewBox      | pathData                                                                                                 | default W×H |
 |---------------------|---------------------|--------------|----------------------------------------------------------------------------------------------------------|-------------|
-| Decision (Diamond)  | diamond             | 0 0 100 100  | M 50 2 L 98 50 L 50 98 L 2 50 Z                                                                          | 120 × 100   |
-| I/O (Parallelogram) | parallelogram       | 0 0 100 60   | M 15 2 L 98 2 L 85 58 L 2 58 Z                                                                           | 140 × 80    |
-| Preparation (Hex)   | hexagon             | 0 0 100 60   | M 20 2 L 80 2 L 98 30 L 80 58 L 20 58 L 2 30 Z                                                           | 140 × 80    |
-| Manual Op (Trap)    | trapezoid           | 0 0 100 60   | M 2 2 L 98 2 L 80 58 L 20 58 Z                                                                           | 140 × 80    |
-| Start / End         | terminator          | 0 0 120 60   | M 30 2 H 90 A 28 28 0 0 1 90 58 H 30 A 28 28 0 0 1 30 2 Z                                                | 140 × 60    |
-| Merge (Triangle)    | triangle            | 0 0 100 100  | M 50 2 L 98 98 L 2 98 Z                                                                                  | 100 × 100   |
-| Document            | document            | 0 0 100 80   | M 2 2 H 98 V 62 Q 75 78 50 64 T 2 62 Z                                                                   | 140 × 100   |
-| Predefined Process  | predefined-process  | 0 0 100 60   | M 2 2 H 98 V 58 H 2 Z M 14 2 V 58 M 86 2 V 58                                                            | 140 × 80    |
-| Database (Cylinder) | cylinder            | 0 0 100 100  | M 2 15 A 48 12 0 0 1 98 15 V 85 A 48 12 0 0 1 2 85 Z M 2 15 A 48 12 0 0 0 98 15                          | 100 × 120   |
-| Cloud               | cloud               | 0 0 120 80   | M 30 70 Q 4 70 10 48 Q 2 28 26 28 Q 30 8 54 16 Q 74 2 86 24 Q 116 26 110 48 Q 118 70 90 70 Z             | 140 × 100   |
-| Off-page (Pentagon) | pentagon            | 0 0 100 100  | M 2 2 L 98 2 L 98 70 L 50 98 L 2 70 Z                                                                    | 100 × 110   |
-| Arrow Block         | arrow-right         | 0 0 120 60   | M 2 18 H 80 V 2 L 118 30 L 80 58 V 42 H 2 Z                                                              | 140 × 70    |
+| Decision (Diamond)  | diamond             | 0 0 100 100  | M 50 0 L 100 50 L 50 100 L 0 50 Z                                                                        | 120 × 100   |
+| I/O (Parallelogram) | parallelogram       | 0 0 100 60   | M 13.5 0 L 100 0 L 86.5 60 L 0 60 Z                                                                       | 140 × 80    |
+| Preparation (Hex)   | hexagon             | 0 0 100 60   | M 18.75 0 L 81.25 0 L 100 30 L 81.25 60 L 18.75 60 L 0 30 Z                                               | 140 × 80    |
+| Manual Op (Trap)    | trapezoid           | 0 0 100 60   | M 0 0 L 100 0 L 81.25 60 L 18.75 60 Z                                                                    | 140 × 80    |
+| Start / End         | terminator          | 0 0 140 60   | Capsule arcs — registry uses \`terminatorSlugPath\` (uniform fit of legacy stadium in bbox); emit matching viewBox ratio | 140 × 60    |
+| Merge (Triangle)    | triangle            | 0 0 100 100  | M 50 0 L 100 100 L 0 100 Z                                                                               | 100 × 100   |
+| Document            | document            | 0 0 100 80   | M 0 0 H 100 V 63.158 Q 76.042 80 50 65.263 T 0 63.158 Z                                                  | 140 × 100   |
+| Predefined Process  | predefined-process  | 0 0 100 60   | M 0 0 H 100 V 60 H 0 Z M 12.5 0 V 60 M 87.5 0 V 60                                                       | 140 × 80    |
+| Database (Cylinder) | cylinder            | 0 0 100 100  | M 0 15 A 50 12 0 0 1 100 15 L 100 85 A 50 12 0 0 1 0 85 Z; lip M 0 15 A 50 12 0 0 0 100 15                | 100 × 120   |
+| Cloud               | cloud               | 0 0 140 72   | Cloud blob — registry uses \`cloudSlugPath\` (uniform fit of flattened Bézier silhouette in bbox); emit matching ratio       | 140 × 72    |
+| Off-page (Pentagon) | pentagon            | 0 0 100 100  | M 0 0 L 100 0 L 100 70.833 L 50 100 L 0 70.833 Z                                                         | 100 × 110   |
+| Concave Lens        | concave-lens        | 0 0 100 100  | Registry uses \`concaveLensPath\`; at 100×100 e.g. M 10 2.2 L 90 2.2 Q 68 50 90 97.8 L 10 97.8 Q -12 50 10 2.2 Z | 170 × 100   |
+| Arrow Block         | arrow-right         | 0 0 120 60   | M 0 18 H 80 V 0 L 120 30 L 80 60 V 42 H 0 Z                                                              | 140 × 70    |
 
 Example (diamond at grid anchor 400, 260):
-\`{ "id": "el_N", "type": "path", "x": 340, "y": 210, "width": 120, "height": 100, "rotation": 0, "fill": "none", "stroke": "#3b82f6", "strokeWidth": 2, "opacity": 1, "zIndex": 12, "aspectLocked": true, "pathData": "M 50 2 L 98 50 L 50 98 L 2 50 Z", "viewBox": "0 0 100 100" }\`
+\`{ "id": "el_N", "type": "path", "x": 340, "y": 210, "width": 120, "height": 100, "rotation": 0, "fill": "none", "stroke": "#3b82f6", "strokeWidth": 2, "opacity": 1, "zIndex": 12, "aspectLocked": true, "pathData": "M 50 0 L 100 50 L 50 100 L 0 50 Z", "viewBox": "0 0 100 100" }\`
 
 Rules:
 - Scale defaultW × defaultH by the same factor on both sides to preserve the viewBox ratio.
@@ -747,38 +788,11 @@ function verifyChecklist(): string {
 }
 
 function toolContract(): string {
-  return `## Output — Tool Calls
+  return `## Output — Tool Call
 
-Emit tool calls, not prose. Every turn ends with exactly the tool call(s) needed to satisfy the user's request. Any text outside tool calls is ignored.
+Every turn ends with exactly one \`create_canvas({ title, elements })\` tool call. No prose, no other tools — text outside the tool call is ignored.
 
-### Deciding which tool
-Every user turn includes a \`<canvas>\` block describing the page they are currently viewing. Two forms:
-- \`<canvas><empty /></canvas>\` — the page has no elements yet.
-- \`<canvas><page_title>…</page_title><elements>[…]</elements></canvas>\` — the page already holds the listed elements (each with its id, position, size, and key style fields).
-
-**DEFAULT BEHAVIOR WHEN THE CANVAS IS NON-EMPTY**: pick \`modify_elements\`, \`add_to_canvas\`, or \`delete_elements\`. The user is iterating on the figure that is already there — treat every request as incremental unless they explicitly ask for something else.
-
-**Picking the right tool (check in order):**
-
-1. \`delete_elements({ ids })\` — user says remove / delete / erase / get rid of / take out. Reference ids from the \`<canvas>\` block.
-
-2. \`modify_elements({ updates: [{ id, patch }] })\` — user says move / resize / recolor / rename / rewrite / change / fix / update / replace text / restyle / swap color / make X bigger / shift Y. Reference the real ids from the \`<canvas>\` block. Each \`patch\` contains ONLY the fields that change (e.g. \`{ "x": 200, "y": 150 }\` to move, \`{ "content": "…" }\` to retitle, \`{ "fill": "#…" }\` to recolor). Never re-emit unchanged fields.
-
-3. \`add_to_canvas({ elements })\` — user says add / insert / append / include / also show / draw another / put in a new X / extend. Emit only the NEW elements. Never re-emit existing elements. Place them in free space, not overlapping any existing element bounding box from the \`<canvas>\` block.
-
-4. \`create_canvas({ title, elements })\` — **ONLY** pick this when BOTH of the following hold:
-   - The \`<canvas>\` block is \`<empty />\`, **OR** the user explicitly says "new canvas" / "new page" / "start over" / "fresh figure" / "clean slate" / "from scratch" / "on a new canvas".
-   - **AND** you are producing a complete figure (not just a handful of add-on elements).
-   If the canvas has elements and the user did not explicitly ask for a new page, do NOT use \`create_canvas\` — pick one of the three tools above instead, even if the request is large. Wrong-tool mistakes here (creating a new canvas when the user wanted edits) are the highest-severity error in this system.
-
-Requests may combine actions (e.g. "replace the title and add a legend" = \`modify_elements\` + \`add_to_canvas\`). Emit multiple tool calls in that turn — they apply in order.
-
-If the request is ambiguous or you have no way to satisfy it (e.g. the user asks to modify "the blue box" but no blue box exists), emit a short plain-text sentence and no tool calls. That is the only time prose is acceptable.
-
-### Element shape
-For \`create_canvas\` and \`add_to_canvas\`, every element in the \`elements\` array follows the Element Type Reference above. Steps 1–6 are INTERNAL reasoning — do them silently; emit only the tool call. For \`add_to_canvas\`, lay out new elements so they do not collide with existing element bounding boxes from the \`<canvas>\` block.
-
-For \`modify_elements\`, \`patch\` keys match the Element Type Reference. Keep patches minimal — omit fields you are not changing.`;
+\`title\` is a short page title (2–6 words). \`elements\` is the full set of elements that make up the figure, each following the Element Type Reference above. Steps 1–6 are INTERNAL reasoning — do them silently; emit only the tool call.`;
 }
 
 // ---------------------------------------------------------------------------
@@ -789,6 +803,8 @@ function commonSections(): string {
   return `${canvasAndGrid()}
 
 ${layeringSystem()}
+
+${themeTokens()}
 
 ${elementTypeDocs()}
 
@@ -815,7 +831,7 @@ export function buildSystemPrompt(): string {
   return `You are a scientific figure layout engine for academic papers. You output pixel-precise elements that render on a 1200×800 SVG canvas. Every coordinate is explicitly calculated — never approximate.
 
 ## Task
-You receive a user request plus (optionally) a \`<canvas>\` block with the elements already on the current page. Choose the right tool — \`create_canvas\`, \`add_to_canvas\`, \`modify_elements\`, or \`delete_elements\` — and emit that tool call. Tool selection rules live at the bottom under "Output — Tool Calls".
+You receive a user request describing a figure. Produce a complete, publication-ready figure as a single \`create_canvas\` tool call. See "Output — Tool Call" at the bottom for the exact shape.
 
 ## Process
 
@@ -857,7 +873,7 @@ export function buildSketchAnalysisPrompt(): string {
   return `You are a scientific figure layout engine. You receive a hand-drawn sketch or existing figure and reproduce it as a clean, publication-ready SVG figure with pixel-precise coordinates on a 1200×800 canvas.
 
 ## Task
-Analyze the sketch, identify every component, and recreate it faithfully. Emit the result via the appropriate tool call (see "Output — Tool Calls" at the bottom): \`create_canvas\` for a fresh page (the usual case for a sketch), \`add_to_canvas\` to extend what is already on the current page, or \`modify_elements\` / \`delete_elements\` when the user's prompt asks for targeted edits rather than a full recreation. A \`<canvas>\` block is included when the user already has elements on screen.
+Analyze the sketch, identify every component, and recreate it faithfully as a single \`create_canvas\` tool call. See "Output — Tool Call" at the bottom for the exact shape.
 
 ## Process
 

@@ -84,11 +84,9 @@ export const figures = pgTable(
   ]
 );
 
-// Custom icons: per-user library of uploaded SVG/PNG/JPG icons. Files live
-// in the `custom-icons` storage bucket at `{owner_id}/{icon_id}.{ext}`.
-// Mirrors supabase/migrations/0003_custom_icons.sql.
-export const customIcons = pgTable(
-  "custom_icons",
+// User-uploaded visuals (SVG + rasters) in Supabase bucket `custom-images`.
+export const customImages = pgTable(
+  "custom_images",
   {
     id: uuid("id").primaryKey().defaultRandom(),
     ownerId: uuid("owner_id")
@@ -105,7 +103,7 @@ export const customIcons = pgTable(
       .defaultNow(),
   },
   (t) => [
-    index("custom_icons_owner_id_created_at_idx").on(
+    index("custom_images_owner_id_created_at_idx").on(
       t.ownerId,
       t.createdAt.desc()
     ),
@@ -116,5 +114,5 @@ export type Project = typeof projects.$inferSelect;
 export type NewProject = typeof projects.$inferInsert;
 export type Figure = typeof figures.$inferSelect;
 export type NewFigure = typeof figures.$inferInsert;
-export type CustomIcon = typeof customIcons.$inferSelect;
-export type NewCustomIcon = typeof customIcons.$inferInsert;
+export type CustomImage = typeof customImages.$inferSelect;
+export type NewCustomImage = typeof customImages.$inferInsert;

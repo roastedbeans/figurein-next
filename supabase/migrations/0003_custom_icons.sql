@@ -23,14 +23,17 @@ create index if not exists custom_icons_owner_id_created_at_idx
 
 alter table public.custom_icons enable row level security;
 
+drop policy if exists "custom_icons_select_own" on public.custom_icons;
 create policy "custom_icons_select_own"
   on public.custom_icons for select
   using (owner_id = auth.uid());
 
+drop policy if exists "custom_icons_insert_own" on public.custom_icons;
 create policy "custom_icons_insert_own"
   on public.custom_icons for insert
   with check (owner_id = auth.uid());
 
+drop policy if exists "custom_icons_delete_own" on public.custom_icons;
 create policy "custom_icons_delete_own"
   on public.custom_icons for delete
   using (owner_id = auth.uid());

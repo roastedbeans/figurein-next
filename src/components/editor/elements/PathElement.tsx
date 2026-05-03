@@ -1,8 +1,9 @@
 import type { PathElement as PathElementType } from "@/types/editor";
 import { strokeDashArray, strokeLineCap } from "@/lib/stroke";
+import { resolvePathElementGeometry } from "@/lib/path-element-geometry";
 
 export function PathElement({ element }: { element: PathElementType }) {
-  // preserveAspectRatio="none" lets the flowchart shape fill its bounding box
+  // preserveAspectRatio="none" lets the stencil path fill its bounding box
   // exactly like a rectangle/circle, so resize handles act as "configure the
   // dimensions" in both axes. vector-effect="non-scaling-stroke" stops the
   // stroke from distorting under non-uniform scale.
@@ -18,6 +19,11 @@ export function PathElement({ element }: { element: PathElementType }) {
     : undefined;
   const dashArray = strokeDashArray(element.strokeStyle, element.strokeWidth);
   const lineCap = element.strokeStyle === "dotted" ? strokeLineCap(element.strokeStyle) : "round";
+
+  const { viewBox, pathD, overlayD } = resolvePathElementGeometry(element);
+  const pathData = pathD;
+  const overlayPath = overlayD;
+
   return (
     <g data-element-id={element.id} className="cursor-move" transform={rotateTransform}>
       {/* Transparent hit area */}
@@ -34,14 +40,14 @@ export function PathElement({ element }: { element: PathElementType }) {
         y={element.y}
         width={element.width}
         height={element.height}
-        viewBox={element.viewBox || "0 0 100 100"}
+        viewBox={viewBox}
         preserveAspectRatio="none"
         overflow="visible"
         opacity={element.opacity}
         style={{ pointerEvents: "none" }}
       >
         <path
-          d={element.pathData}
+          d={pathData}
           fill={element.fill}
           stroke={element.stroke}
           strokeWidth={element.strokeWidth}
@@ -50,6 +56,18 @@ export function PathElement({ element }: { element: PathElementType }) {
           strokeLinejoin="round"
           vectorEffect="non-scaling-stroke"
         />
+        {overlayPath && (
+          <path
+            d={overlayPath}
+            fill="none"
+            stroke={element.stroke}
+            strokeWidth={element.strokeWidth}
+            strokeDasharray={dashArray}
+            strokeLinecap={lineCap}
+            strokeLinejoin="round"
+            vectorEffect="non-scaling-stroke"
+          />
+        )}
       </svg>
     </g>
   );

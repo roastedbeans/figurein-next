@@ -34,6 +34,7 @@ export function RectElement({ element }: { element: RectangleElement }) {
         strokeWidth={element.strokeWidth}
         strokeDasharray={dashArray}
         strokeLinecap={strokeLineCap(element.strokeStyle)}
+        vectorEffect="non-scaling-stroke"
         opacity={element.opacity}
         style={{ pointerEvents: "none" }}
       />

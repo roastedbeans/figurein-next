@@ -102,7 +102,7 @@ export function CanvasContextMenu({ children }: { children: React.ReactNode }) {
   const onContextMenu = useCallback(
     (e: React.MouseEvent) => {
       const svg = document.getElementById(
-        "figurein-canvas"
+        "figurin-canvas"
       ) as SVGSVGElement | null;
       if (svg) {
         const rect = svg.getBoundingClientRect();

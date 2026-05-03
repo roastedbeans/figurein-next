@@ -424,12 +424,19 @@ interface ColorPickerFieldProps {
 
 export function ColorPickerField({
   label,
-  value,
+  value: valueProp,
   onChange,
   onChangeLive,
   allowNone = false,
   compact = false,
 }: ColorPickerFieldProps) {
+  // Coerce missing / non-string input to "none". The prop is typed as
+  // `string`, but partially-initialized elements or AI-generated payloads
+  // can leak undefined here; rendering "none" is a safe default that the
+  // picker already knows how to show, and avoids crashing on toLowerCase /
+  // parseColor calls deeper in the component.
+  const value =
+    typeof valueProp === "string" && valueProp.length > 0 ? valueProp : "none";
   const [hsv, setHsv] = useState<HSV>(() => parseColor(value));
   const [hexInput, setHexInput] = useState(value);
   const docColors = useDocumentColors();

@@ -2,7 +2,6 @@ import { create } from "zustand";
 import type {
   ArrowElement,
   EditorElement,
-  LineElement,
   Tool,
   CanvasState,
 } from "@/types/editor";
@@ -10,9 +9,11 @@ import {
   HISTORY_LIMIT,
   MIN_ZOOM,
   MAX_ZOOM,
+  centeredPanForViewport,
   type TextVariant,
 } from "@/lib/constants";
-import type { FlowchartShape } from "@/lib/flowchart-shapes";
+import type { ShapeStencil } from "@/lib/shape-stencils";
+import { SHAPES_BY_ID } from "@/lib/shape-stencils";
 import { applyCascadeReflow, type PlannedSnapshot } from "@/lib/reflow";
 import { resolveConnectorWithMap } from "@/lib/connector-geometry";
 
@@ -48,14 +49,6 @@ export type Page = {
   future: EditorElement[][];
 };
 
-export type SmartFigureMessage = {
-  id: string;
-  role: "user" | "assistant";
-  text: string;
-  image?: string;
-  timestamp: number;
-};
-
 type EditorStore = {
   // Pages
   pages: Page[];
@@ -78,6 +71,8 @@ type EditorStore = {
 
   // Element CRUD
   addElement: (element: EditorElement) => void;
+  /** Append many elements in one history step (e.g. grouped shape presets). */
+  addElements: (elements: EditorElement[]) => void;
   updateElement: (id: string, updates: Partial<EditorElement>) => void;
   updateElementLive: (id: string, updates: Partial<EditorElement>) => void;
   /** Bulk live-update: applies multiple per-element partials in a single
@@ -90,6 +85,28 @@ type EditorStore = {
   deleteElement: (id: string) => void;
   deleteElements: (ids: string[]) => void;
   setElements: (elements: EditorElement[]) => void;
+
+  /** Align a multi-selection to the selection's combined bbox along the
+   *  given axis. The canvas is the implicit parent — selection doesn't
+   *  need to share a frame to align. */
+  alignSelection: (
+    ids: string[],
+    axis: "left" | "center-x" | "right" | "top" | "center-y" | "bottom"
+  ) => void;
+
+  /** Spread a 3+ multi-selection evenly along an axis. The two outermost
+   *  elements stay put; intermediate elements are repositioned with equal
+   *  gaps between adjacent edges. */
+  distributeSelection: (
+    ids: string[],
+    axis: "horizontal" | "vertical"
+  ) => void;
+
+  /** Distribute both axes in one history step — runs the same
+   *  per-axis algorithm as `distributeSelection` for "horizontal" and
+   *  "vertical", computed against the original geometry so neither pass
+   *  skews the other. Useful for grid-shaped selections. */
+  tidySelection: (ids: string[]) => void;
 
   // Selection
   selectElement: (id: string | null) => void;
@@ -116,6 +133,8 @@ type EditorStore = {
    *  existing pan out of bounds. */
   setViewportSize: (width: number, height: number) => void;
   fitView: () => void;
+  /** 100% zoom and artboard centered in the viewport — same as initial open. */
+  resetToDefaultView: () => void;
   showGrid: boolean;
   toggleGrid: () => void;
 
@@ -164,8 +183,8 @@ type EditorStore = {
    *  text-format toolbar overlay. */
   editingTextId: string | null;
   setEditingTextId: (id: string | null) => void;
-  editingConnectorId: string | null;
-  setEditingConnectorId: (id: string | null) => void;
+  editingConnectorLabel: { id: string; role: "source" | "center" | "target" } | null;
+  setEditingConnectorLabel: (val: { id: string; role: "source" | "center" | "target" } | null) => void;
   /** One-shot signal: the text element whose id matches should auto-enter
    *  edit mode on mount with its entire content selected, so the user can
    *  type and immediately replace the placeholder. TextElement clears this
@@ -180,8 +199,8 @@ type EditorStore = {
   /** Flowchart shape awaiting placement. When non-null and tool is "path",
    *  mouse-down on the canvas starts drawing this shape exactly like the
    *  rectangle/circle tools — drag to size, click to stamp default size. */
-  pendingPathShape: FlowchartShape | null;
-  setPendingPathShape: (shape: FlowchartShape | null) => void;
+  pendingPathShape: ShapeStencil | null;
+  setPendingPathShape: (shape: ShapeStencil | null) => void;
 
   // Page management
   addPage: (title?: string) => string;
@@ -217,8 +236,6 @@ type EditorStore = {
   smartFigureOpen: boolean;
   toggleSmartFigure: () => void;
   setSmartFigureOpen: (open: boolean) => void;
-  smartFigureMessages: SmartFigureMessage[];
-  appendSmartFigureMessage: (msg: SmartFigureMessage) => void;
 
   // Persistence — dirty tracking lets the auto-save hook serialize and send
   // only the pages that actually changed since the last successful save
@@ -240,7 +257,7 @@ export type ReplaceTemplate =
   | { kind: "icon"; iconId: string }
   | { kind: "rectangle" }
   | { kind: "circle" }
-  | { kind: "flowchart"; pathData: string; viewBox: string; shapeId?: string };
+  | { kind: "stencil"; pathData: string; viewBox: string; shapeId?: string };
 
 export type SerializedPage = {
   id: string;
@@ -284,6 +301,142 @@ function generateId(): string {
 // JSONB and never cross the row boundary.
 function generatePageId(): string {
   return crypto.randomUUID();
+}
+
+/** Per-axis bbox of any element. Connectors use the min/max of their
+ *  endpoints; everything else uses (x, y, width, height). */
+function distBbox(el: EditorElement): {
+  l: number;
+  t: number;
+  w: number;
+  h: number;
+} {
+  if (el.type === "arrow") {
+    return {
+      l: Math.min(el.x, el.x2),
+      t: Math.min(el.y, el.y2),
+      w: Math.abs(el.x2 - el.x),
+      h: Math.abs(el.y2 - el.y),
+    };
+  }
+  return { l: el.x, t: el.y, w: el.width, h: el.height };
+}
+
+/** Compute the target start-edge position (along the given axis) for each
+ *  middle element when distributing the selection. The two outermost stay
+ *  put — those don't appear in the returned map. Empty map when the
+ *  selection has fewer than 3 distributable items. */
+function computeDistributePositions(
+  targets: EditorElement[],
+  axis: "horizontal" | "vertical"
+): Map<string, number> {
+  const out = new Map<string, number>();
+  if (targets.length < 3) return out;
+
+  const horiz = axis === "horizontal";
+  const sorted = [...targets].sort((a, b) => {
+    const ba = distBbox(a);
+    const bb = distBbox(b);
+    return horiz ? ba.l - bb.l : ba.t - bb.t;
+  });
+  const firstB = distBbox(sorted[0]);
+  const lastB = distBbox(sorted[sorted.length - 1]);
+  const totalSpan = horiz
+    ? lastB.l + lastB.w - firstB.l
+    : lastB.t + lastB.h - firstB.t;
+  const sumSize = sorted.reduce((s, el) => {
+    const b = distBbox(el);
+    return s + (horiz ? b.w : b.h);
+  }, 0);
+  const gap = (totalSpan - sumSize) / (sorted.length - 1);
+
+  let cursor = horiz ? firstB.l + firstB.w : firstB.t + firstB.h;
+  for (let i = 1; i < sorted.length - 1; i++) {
+    cursor += gap;
+    out.set(sorted[i].id, cursor);
+    const b = distBbox(sorted[i]);
+    cursor += horiz ? b.w : b.h;
+  }
+  return out;
+}
+
+/** Group elements whose bboxes overlap along the given axis. Two elements
+ *  are in the same row iff their Y-extents overlap; same column iff their
+ *  X-extents overlap. Used by `tidySelection` to detect grid structure
+ *  before distributing — without this, four corner shapes get squashed
+ *  into a single line because they all share both an "axis sort" and a
+ *  "distribute pass." */
+function clusterByOverlap(
+  elements: EditorElement[],
+  axis: "row" | "column"
+): EditorElement[][] {
+  const n = elements.length;
+  if (n === 0) return [];
+  const parent = new Array<number>(n);
+  for (let i = 0; i < n; i++) parent[i] = i;
+  const find = (i: number): number => {
+    while (parent[i] !== i) {
+      parent[i] = parent[parent[i]];
+      i = parent[i];
+    }
+    return i;
+  };
+  const bboxes = elements.map(distBbox);
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const a = bboxes[i];
+      const b = bboxes[j];
+      // Row clustering uses Y-overlap (same horizontal band); column
+      // clustering uses X-overlap (same vertical strip).
+      const overlap =
+        axis === "row"
+          ? !(a.t + a.h <= b.t || b.t + b.h <= a.t)
+          : !(a.l + a.w <= b.l || b.l + b.w <= a.l);
+      if (overlap) {
+        const ri = find(i);
+        const rj = find(j);
+        if (ri !== rj) parent[ri] = rj;
+      }
+    }
+  }
+  const groups = new Map<number, EditorElement[]>();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    let g = groups.get(root);
+    if (!g) {
+      g = [];
+      groups.set(root, g);
+    }
+    g.push(elements[i]);
+  }
+  return Array.from(groups.values());
+}
+
+/** Translate `el` so its bbox start-edge along `axis` lands at the position
+ *  recorded in `positions`. Connectors translate both endpoints rigidly so
+ *  their shape and direction are preserved. Elements not in `positions` are
+ *  returned unchanged. */
+function applyDistributePosition<T extends EditorElement>(
+  el: T,
+  positions: Map<string, number>,
+  axis: "horizontal" | "vertical"
+): T {
+  const target = positions.get(el.id);
+  if (target === undefined) return el;
+  const b = distBbox(el);
+  const horiz = axis === "horizontal";
+  const dx = horiz ? target - b.l : 0;
+  const dy = horiz ? 0 : target - b.t;
+  if (el.type === "arrow") {
+    return {
+      ...el,
+      x: el.x + dx,
+      y: el.y + dy,
+      x2: el.x2 + dx,
+      y2: el.y2 + dy,
+    };
+  }
+  return { ...el, x: el.x + dx, y: el.y + dy };
 }
 
 function createPage(title: string): Page {
@@ -415,13 +568,12 @@ export const useEditorStore = create<EditorStore>((set, get) => {
     hoveredElementId: null,
     editingGroupId: null,
     editingTextId: null,
-    editingConnectorId: null,
+    editingConnectorLabel: null,
     autoEditTextId: null,
     textVariant: "body",
     showGrid: true,
     pendingPathShape: null,
     smartFigureOpen: false,
-    smartFigureMessages: [],
     pendingMeasure: null,
     dirtyPageIds: new Set<string>(),
     deletedPageIds: new Set<string>(),
@@ -445,6 +597,21 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       });
     },
 
+    addElements: (incoming) => {
+      if (incoming.length === 0) return;
+      const state = get();
+      const newHistory = [
+        ...state.history.slice(-HISTORY_LIMIT),
+        state.elements,
+      ];
+      set({
+        elements: [...state.elements, ...incoming],
+        history: newHistory,
+        future: [],
+        dirtyPageIds: addDirty(state.dirtyPageIds, state.currentPageId),
+      });
+    },
+
     updateElement: (id, updates) => {
       const state = get();
       const newHistory = [
@@ -453,8 +620,8 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       ];
       set({
         elements: state.elements.map((el) =>
-          el.id === id ? ({ ...el, ...updates } as EditorElement) : el
-        ),
+            el.id === id ? ({ ...el, ...updates } as EditorElement) : el
+          ),
         history: newHistory,
         future: [],
         dirtyPageIds: addDirty(state.dirtyPageIds, state.currentPageId),
@@ -464,8 +631,8 @@ export const useEditorStore = create<EditorStore>((set, get) => {
     updateElementLive: (id, updates) => {
       set((state) => ({
         elements: state.elements.map((el) =>
-          el.id === id ? ({ ...el, ...updates } as EditorElement) : el
-        ),
+            el.id === id ? ({ ...el, ...updates } as EditorElement) : el
+          ),
         dirtyPageIds: addDirty(state.dirtyPageIds, state.currentPageId),
       }));
     },
@@ -474,9 +641,9 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       if (updates.size === 0) return;
       set((state) => ({
         elements: state.elements.map((el) => {
-          const u = updates.get(el.id);
-          return u ? ({ ...el, ...u } as EditorElement) : el;
-        }),
+            const u = updates.get(el.id);
+            return u ? ({ ...el, ...u } as EditorElement) : el;
+          }),
         dirtyPageIds: addDirty(state.dirtyPageIds, state.currentPageId),
       }));
     },
@@ -521,6 +688,221 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         history: newHistory,
         future: [],
         ...withSel(remainingIds),
+        dirtyPageIds: addDirty(state.dirtyPageIds, state.currentPageId),
+      });
+    },
+
+
+    alignSelection: (ids, axis) => {
+      const state = get();
+      const idSet = new Set(ids);
+      const targets = state.elements.filter((el) => idSet.has(el.id));
+      if (targets.length < 2) return;
+
+      // Uniform bbox for any element type — arrows / lines use the
+      // min/max of their endpoint coordinates.
+      const bboxOf = (el: EditorElement) => {
+        if (el.type === "arrow") {
+          return {
+            l: Math.min(el.x, el.x2),
+            t: Math.min(el.y, el.y2),
+            w: Math.abs(el.x2 - el.x),
+            h: Math.abs(el.y2 - el.y),
+          };
+        }
+        return { l: el.x, t: el.y, w: el.width, h: el.height };
+      };
+
+      let minX = Infinity,
+        minY = Infinity,
+        maxX = -Infinity,
+        maxY = -Infinity;
+      for (const el of targets) {
+        const b = bboxOf(el);
+        minX = Math.min(minX, b.l);
+        minY = Math.min(minY, b.t);
+        maxX = Math.max(maxX, b.l + b.w);
+        maxY = Math.max(maxY, b.t + b.h);
+      }
+      const cx = (minX + maxX) / 2;
+      const cy = (minY + maxY) / 2;
+      const targetIdSet = new Set(targets.map((el) => el.id));
+
+      // Translate an element by (dx, dy) — for arrows/lines this means
+      // moving BOTH endpoints together. Bound endpoints will be re-resolved
+      // from their target bbox at render, so translating bound arrows is a
+      // visual no-op (correct: they should follow their anchors).
+      const translate = (el: EditorElement, dx: number, dy: number) => {
+        if (el.type === "arrow") {
+          return {
+            ...el,
+            x: el.x + dx,
+            y: el.y + dy,
+            x2: el.x2 + dx,
+            y2: el.y2 + dy,
+          };
+        }
+        return { ...el, x: el.x + dx, y: el.y + dy };
+      };
+
+      set({
+        elements: state.elements.map((el) => {
+            if (!targetIdSet.has(el.id)) return el;
+            const b = bboxOf(el);
+            switch (axis) {
+              case "left":
+                return translate(el, minX - b.l, 0);
+              case "right":
+                return translate(el, maxX - (b.l + b.w), 0);
+              case "center-x":
+                return translate(el, cx - (b.l + b.w / 2), 0);
+              case "top":
+                return translate(el, 0, minY - b.t);
+              case "bottom":
+                return translate(el, 0, maxY - (b.t + b.h));
+              case "center-y":
+                return translate(el, 0, cy - (b.t + b.h / 2));
+            }
+          }),
+        history: [...state.history.slice(-HISTORY_LIMIT), state.elements],
+        future: [],
+        dirtyPageIds: addDirty(state.dirtyPageIds, state.currentPageId),
+      });
+    },
+
+    distributeSelection: (ids, axis) => {
+      const state = get();
+      const idSet = new Set(ids);
+      const targets = state.elements.filter((el) => idSet.has(el.id));
+      const positions = computeDistributePositions(targets, axis);
+      if (positions.size === 0) return;
+      set({
+        elements: state.elements.map((el) =>
+          applyDistributePosition(el, positions, axis)
+        ),
+        history: [...state.history.slice(-HISTORY_LIMIT), state.elements],
+        future: [],
+        dirtyPageIds: addDirty(state.dirtyPageIds, state.currentPageId),
+      });
+    },
+
+    tidySelection: (ids) => {
+      const state = get();
+      const idSet = new Set(ids);
+      const targets = state.elements.filter((el) => idSet.has(el.id));
+      if (targets.length < 2) return;
+
+      // Detect grid structure by bbox overlap, then do two passes:
+      //   1. ALIGN — every row's shapes snap to the row's center-Y, every
+      //      column's shapes snap to the column's center-X. Cleans up
+      //      slightly-off grids (the 2×2 corner case where there's nothing
+      //      to "distribute" but the rows/cols are visibly misaligned).
+      //   2. DISTRIBUTE — within each row of 3+, equalize X-gaps; within
+      //      each column of 3+, equalize Y-gaps.
+      const rows = clusterByOverlap(targets, "row");
+      const cols = clusterByOverlap(targets, "column");
+
+      // Pass 1: alignment. Compute per-row average center-Y and per-column
+      // average center-X. We align to the AVERAGE so the alignment
+      // settles toward the user's intended position rather than snapping
+      // to whichever shape happened to be sorted first.
+      const alignedY = new Map<string, number>();
+      for (const row of rows) {
+        if (row.length < 2) continue;
+        let sumCY = 0;
+        for (const el of row) {
+          const b = distBbox(el);
+          sumCY += b.t + b.h / 2;
+        }
+        const avgCY = sumCY / row.length;
+        for (const el of row) {
+          const b = distBbox(el);
+          alignedY.set(el.id, avgCY - b.h / 2);
+        }
+      }
+      const alignedX = new Map<string, number>();
+      for (const col of cols) {
+        if (col.length < 2) continue;
+        let sumCX = 0;
+        for (const el of col) {
+          const b = distBbox(el);
+          sumCX += b.l + b.w / 2;
+        }
+        const avgCX = sumCX / col.length;
+        for (const el of col) {
+          const b = distBbox(el);
+          alignedX.set(el.id, avgCX - b.w / 2);
+        }
+      }
+
+      // Pass 2: distribution within rows/columns of 3+.
+      const horizPositions = new Map<string, number>();
+      for (const row of rows) {
+        if (row.length < 3) continue;
+        for (const [id, pos] of computeDistributePositions(
+          row,
+          "horizontal"
+        )) {
+          horizPositions.set(id, pos);
+        }
+      }
+      const vertPositions = new Map<string, number>();
+      for (const col of cols) {
+        if (col.length < 3) continue;
+        for (const [id, pos] of computeDistributePositions(
+          col,
+          "vertical"
+        )) {
+          vertPositions.set(id, pos);
+        }
+      }
+
+      if (
+        alignedY.size === 0 &&
+        alignedX.size === 0 &&
+        horizPositions.size === 0 &&
+        vertPositions.size === 0
+      ) {
+        return;
+      }
+
+      // Translate each element by the combination of alignment and
+      // distribution deltas. Distribution wins over alignment along its
+      // own axis (a row of 3+ gets BOTH X-distributed and Y-aligned to
+      // the row's center).
+      const translateEl = (el: EditorElement, dx: number, dy: number) => {
+        if (el.type === "arrow") {
+          return {
+            ...el,
+            x: el.x + dx,
+            y: el.y + dy,
+            x2: el.x2 + dx,
+            y2: el.y2 + dy,
+          };
+        }
+        return { ...el, x: el.x + dx, y: el.y + dy };
+      };
+
+      set({
+        elements: state.elements.map((el) => {
+          if (!idSet.has(el.id)) return el;
+          const b = distBbox(el);
+          const distX = horizPositions.get(el.id);
+          const distY = vertPositions.get(el.id);
+          const alX = alignedX.get(el.id);
+          const alY = alignedY.get(el.id);
+          // Pick distribute target if present (it determines the column
+          // position within a row), otherwise the alignment target.
+          const targetL = distX ?? alX;
+          const targetT = distY ?? alY;
+          if (targetL === undefined && targetT === undefined) return el;
+          const dx = targetL !== undefined ? targetL - b.l : 0;
+          const dy = targetT !== undefined ? targetT - b.t : 0;
+          if (dx === 0 && dy === 0) return el;
+          return translateEl(el, dx, dy);
+        }),
+        history: [...state.history.slice(-HISTORY_LIMIT), state.elements],
+        future: [],
         dirtyPageIds: addDirty(state.dirtyPageIds, state.currentPageId),
       });
     },
@@ -585,7 +967,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       // fall back to a +20 shift if the cursor has never entered the canvas).
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (const el of state.clipboard) {
-        if (el.type === "line" || el.type === "arrow") {
+        if (el.type === "arrow") {
           const c = el as EditorElement & { x2: number; y2: number };
           minX = Math.min(minX, c.x, c.x2);
           minY = Math.min(minY, c.y, c.y2);
@@ -621,7 +1003,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
           y: el.y + dy,
           zIndex: baseZ + i,
         } as EditorElement;
-        if (next.type === "line" || next.type === "arrow") {
+        if (next.type === "arrow") {
           (next as EditorElement & { x2: number; y2: number }).x2 =
             (el as EditorElement & { x2: number }).x2 + dx;
           (next as EditorElement & { x2: number; y2: number }).y2 =
@@ -647,11 +1029,11 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         tool,
         ...withSel([]),
         editingGroupId: null,
-        editingConnectorId: null,
+        editingConnectorLabel: null,
         editingTextId: null,
         autoEditTextId: null,
         // Switching to any tool other than "path" drops the pending shape so
-        // the next "path" activation must re-select which flowchart to stamp.
+        // the next "path" activation must re-select which stencil to stamp.
         pendingPathShape: tool === "path" ? state.pendingPathShape : null,
       })),
 
@@ -676,8 +1058,8 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (const el of elements) {
         const half = (el.strokeWidth ?? 0) / 2;
-        if (el.type === "line" || el.type === "arrow") {
-          const c = el as ArrowElement | LineElement;
+        if (el.type === "arrow") {
+          const c = el as ArrowElement;
           minX = Math.min(minX, c.x - half, c.x2 - half);
           minY = Math.min(minY, c.y - half, c.y2 - half);
           maxX = Math.max(maxX, c.x + half, c.x2 + half);
@@ -699,6 +1081,19 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       const panX = viewportWidth / 2 - ((minX + maxX) / 2) * zoom;
       const panY = viewportHeight / 2 - ((minY + maxY) / 2) * zoom;
       set((s) => ({ canvas: { ...s.canvas, zoom, panX, panY } }));
+    },
+
+    resetToDefaultView: () => {
+      const zoom = 1;
+      set((state) => {
+        const { viewportWidth, viewportHeight } = state.canvas;
+        const { panX, panY } = centeredPanForViewport(
+          viewportWidth,
+          viewportHeight,
+          zoom
+        );
+        return { canvas: { ...state.canvas, zoom, panX, panY } };
+      });
     },
 
     toggleGrid: () => set((state) => ({ showGrid: !state.showGrid })),
@@ -810,15 +1205,23 @@ export const useEditorStore = create<EditorStore>((set, get) => {
           // non-square source stays visually intact until the user resizes.
           replacement = { ...base, type: "circle" };
           break;
-        case "flowchart":
+        case "stencil": {
+          const def =
+            template.shapeId && SHAPES_BY_ID[template.shapeId]
+              ? SHAPES_BY_ID[template.shapeId]
+              : undefined;
+          const gen = def?.pathGenerator;
+          const w = base.width;
+          const h = base.height;
           replacement = {
             ...base,
             type: "path",
-            pathData: template.pathData,
-            viewBox: template.viewBox,
+            pathData: gen ? gen(w, h) : template.pathData,
+            viewBox: gen ? `0 0 ${w} ${h}` : template.viewBox,
             shapeId: template.shapeId,
           };
           break;
+        }
       }
 
       const newHistory = [
@@ -879,7 +1282,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         history: newHistory,
         future: [],
         editingGroupId: null,
-        editingConnectorId: null,
+        editingConnectorLabel: null,
         dirtyPageIds: addDirty(state.dirtyPageIds, state.currentPageId),
       });
     },
@@ -905,7 +1308,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
 
     setEditingTextId: (id) => set({ editingTextId: id }),
 
-    setEditingConnectorId: (id) => set({ editingConnectorId: id }),
+    setEditingConnectorLabel: (val) => set({ editingConnectorLabel: val }),
 
     setAutoEditTextId: (id) => set({ autoEditTextId: id }),
 
@@ -998,12 +1401,12 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       // Same pendingMeasure machinery as addPageWithElements: stamp every
       // new text id so its first-mount handler in TextElement runs the
       // intrinsic-height measurement (strip minHeight, read scrollHeight).
-      // Without this, an AI-overestimated height on an `add_to_canvas`
-      // element stayed unchallenged — the synchronous useLayoutEffect is
-      // grow-only and never shrinks an over-tall box, so the box rendered
-      // with empty space below the content. `originals` snapshots only the
-      // new elements; the cascade reflow uses it to shift only NEW followers
-      // (existing canvas elements were not part of this generation).
+      // Without this, an over-tall planned height stayed unchallenged — the
+      // synchronous useLayoutEffect is grow-only and never shrinks an
+      // over-tall box, so the box rendered with empty space below the
+      // content. `originals` snapshots only the new elements; the cascade
+      // reflow uses it to shift only NEW followers (existing canvas elements
+      // were not part of this insert).
       const newOriginals = new Map<string, PlannedSnapshot>();
       const newTextIds = new Set<string>();
       for (const el of stamped) {
@@ -1017,11 +1420,10 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         });
         if (el.type === "text") newTextIds.add(el.id);
       }
-      // Merge with whatever pending batch is already in flight (a
-      // create_canvas could be mid-measure when an add_to_canvas lands in
-      // the same response). Both batches' ids stay flagged until each
-      // text reports its measurement; reportMeasuredHeight clears the set
-      // once empty.
+      // Merge with whatever pending batch is already in flight (a previous
+      // insert could be mid-measure when another batch arrives). Both
+      // batches' ids stay flagged until each text reports its measurement;
+      // reportMeasuredHeight clears the set once empty.
       let nextPendingMeasure = state.pendingMeasure;
       if (newTextIds.size > 0) {
         const mergedTextIds = state.pendingMeasure
@@ -1080,22 +1482,22 @@ export const useEditorStore = create<EditorStore>((set, get) => {
 
     setSmartFigureOpen: (open) => set({ smartFigureOpen: open }),
 
-    appendSmartFigureMessage: (msg) =>
-      set((state) => ({
-        smartFigureMessages: [...state.smartFigureMessages, msg],
-      })),
-
     addPageWithElements: (title, elements) => {
       const state = get();
       const updatedPages = saveCurrentPageState(state);
       const newPage = createPage(title);
-      newPage.elements = elements;
+      newPage.elements = elements.map((el) =>
+        el.parentId === undefined
+          ? ({ ...el, parentId: null } as EditorElement)
+          : el
+      );
+      const pageElements = newPage.elements;
       // Snapshot every element's emitted geometry + collect every text id
       // whose height we need the browser to confirm. The cascade reflow
       // uses the snapshot as its "planned" coordinate baseline.
       const originals = new Map<string, PlannedSnapshot>();
       const textIds = new Set<string>();
-      for (const el of elements) {
+      for (const el of pageElements) {
         originals.set(el.id, {
           x: el.x,
           y: el.y,
@@ -1109,7 +1511,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       set({
         pages: [...updatedPages, newPage],
         currentPageId: newPage.id,
-        elements,
+        elements: pageElements,
         ...withSel([]),
         history: [],
         future: [],
@@ -1265,7 +1667,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         tool: "select",
         ...withSel([]),
         editingGroupId: null,
-        editingConnectorId: null,
+        editingConnectorLabel: null,
         editingTextId: null,
         autoEditTextId: null,
         // pendingMeasure is page-scoped: it tracks text ids that need first-
@@ -1367,11 +1769,28 @@ export const useEditorStore = create<EditorStore>((set, get) => {
       // parentId field being present. No cost on current-shape documents
       // (the map still runs but spreads identical fields).
       const hydrateElements = (els: EditorElement[]): EditorElement[] =>
-        els.map((el) =>
-          el.parentId === undefined
-            ? ({ ...el, parentId: null } as EditorElement)
-            : el
-        );
+        els.map((el) => {
+          let next: Record<string, unknown> = el as unknown as Record<
+            string,
+            unknown
+          >;
+          // Migrate legacy `type: "line"` to `type: "arrow"` with no
+          // head/tail. Lines and arrows are unified under one connector
+          // type now; saved figures from before the merge get migrated
+          // transparently on load.
+          if ((next as { type?: string }).type === "line") {
+            next = {
+              ...next,
+              type: "arrow",
+              headStyle: (next as { headStyle?: string }).headStyle ?? "none",
+              tailStyle: (next as { tailStyle?: string }).tailStyle ?? "none",
+            };
+          }
+          if ((next as { parentId?: unknown }).parentId === undefined) {
+            next = { ...next, parentId: null };
+          }
+          return next as unknown as EditorElement;
+        });
       const incoming: Page[] =
         snapshot.pages.length > 0
           ? snapshot.pages.map((p) => ({
@@ -1397,7 +1816,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         canvas: { ...prevCanvas, zoom: 1, panX: 0, panY: 0 },
         marquee: null,
         editingGroupId: null,
-        editingConnectorId: null,
+        editingConnectorLabel: null,
         editingTextId: null,
         autoEditTextId: null,
         snapTargetId: null,

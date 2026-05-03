@@ -60,7 +60,14 @@ export function TextElement({ element }: { element: TextElementType }) {
   const measureHeightNow = useCallback(() => {
     const div = divRef.current;
     if (!div) return;
-    const measured = div.scrollHeight;
+    // offsetHeight = the div's full border-box rendered height (content +
+    // padding + border). This is what the user actually sees as the
+    // container. Using scrollHeight here was a bug — scrollHeight excludes
+    // the border, so the SVG bbox came out 2×strokeWidth shorter than the
+    // visible styled box every time the text had a stroke. Dragging the
+    // resize handle smaller exposed it most clearly: container at offset,
+    // viewbox at scroll, gap = border thickness.
+    const measured = div.offsetHeight;
     if (measured <= 0) return;
     const snapped = Math.ceil(measured / 5) * 5;
     const { y: curY, height: curHeight } = elementLayoutRef.current;
@@ -101,12 +108,31 @@ export function TextElement({ element }: { element: TextElementType }) {
     };
   }, []);
 
-  // Measure on mount and whenever content / sizing inputs change, editing
-  // or not. Grow-only keeps idle elements stable — measureHeight is a
-  // no-op when the declared height already fits.
-  useEffect(() => {
-    measureHeight();
-  }, [measureHeight, element.content, element.width, element.fontSize, element.fontWeight, element.fontFamily]);
+  // Synchronous bbox sync — runs after every commit, before the browser
+  // paints. Reads the div's offsetHeight (= visible border-box height) and,
+  // when it exceeds the stored element.height, writes the new size to the
+  // store. Because measureHeightNow is a no-op when the size already fits,
+  // the second run after a corrective update is `if (snapped <= curHeight + 1)
+  // return;` — the loop terminates after one corrective render.
+  //
+  // Replaces three older paths that did partially-overlapping work:
+  //   - useEffect on [content, width, font*]  — caught prop changes one frame late.
+  //   - rAF-throttled measureHeight in onInput — typing was always one frame behind.
+  //   - a local measuredHeight state          — diverged from element.height.
+  // With one synchronous effect the SVG bbox, the styled container, and the
+  // store's element.height are all the same value before the browser paints
+  // — there is no frame where they can disagree, regardless of whether the
+  // resize came from a drag handle, content edit, font swap, or AI emit.
+  //
+  // No deps array on purpose: the effect must fire after every render where
+  // the layout could have shifted; the layout-flush cost of one offsetHeight
+  // read per render is the price for "no flicker, ever." Typing is handled
+  // by onInput → measureHeight below — contentEditable mutates the DOM
+  // outside React, so without that bridge no commit would happen and this
+  // effect wouldn't fire on its own.
+  useLayoutEffect(() => {
+    measureHeightNow();
+  });
 
   // Exit editing when deselected
   useEffect(() => {
@@ -163,8 +189,20 @@ export function TextElement({ element }: { element: TextElementType }) {
     div.style.minHeight = "0px";
     const measured = div.scrollHeight;
     div.style.minHeight = savedMinHeight;
-    if (measured <= 0) return;
-    const snapped = Math.ceil(measured / 5) * 5;
+    // ALWAYS report — even when scrollHeight is 0 (empty content, hidden
+    // element, parent display:none, etc.). Skipping the report kept the id
+    // in pendingMeasure forever and stuck the "Finalizing layout…" overlay
+    // visible until the page was reloaded. Falling back to the element's
+    // declared height makes the cascade reflow a no-op for this element
+    // (planned height === reported height → 0 shift), which is the
+    // visually-correct behavior when we have no measurement to act on.
+    const snapped =
+      measured > 0
+        ? Math.ceil(measured / 5) * 5
+        : Math.max(
+            element.height,
+            Math.ceil((element.fontSize * 1.2 + 8) / 5) * 5
+          );
     useEditorStore.getState().reportMeasuredHeight(element.id, snapped);
     // Keep the top-handle-shrink detector in sync so the next measureHeight
     // call doesn't misread this correction as a user drag.
@@ -225,12 +263,18 @@ export function TextElement({ element }: { element: TextElementType }) {
     setEditingTextId(null);
   };
 
-  // Respect the declared height exactly so AI-planned layouts stay stable.
-  // A floor at a single line-height keeps brand-new empty text boxes from
-  // rendering as 0px tall during the mount → first-measure gap.
-  const renderHeight = isEditing
-    ? Math.max(element.height, element.fontSize * 1.2 + 8)
-    : element.height;
+  // Single rendered height for everything: SVG bbox, foreignObject viewport,
+  // and the div's min-height. The useLayoutEffect above keeps element.height
+  // === div.offsetHeight, so this value is the rendered border-box size of
+  // the container the user sees. No max() against a separate measuredHeight
+  // state — that was the source of the previous mismatch (two values that
+  // could drift apart). The fontSize floor only kicks in during the very
+  // first commit before the effect has run, to avoid a 0-tall flash on a
+  // brand-new empty text element.
+  const renderHeight = Math.max(
+    element.height,
+    isEditing ? element.fontSize * 1.2 + 8 : 0
+  );
 
   // Rotate around the element's center so snap-to-45° from the rotation handle
   // lands the text on clean axes (0° / 90° / -90° / …) without drift.
@@ -240,7 +284,9 @@ export function TextElement({ element }: { element: TextElementType }) {
 
   return (
     <g data-element-id={element.id} className="cursor-move" transform={rotateTransform}>
-      {/* Transparent hit area matching measured height */}
+      {/* Transparent hit area matching the rendered container — never the
+          declared element.height, which can be smaller than what the user
+          sees when content overflows. */}
       <rect
         x={element.x}
         y={element.y}

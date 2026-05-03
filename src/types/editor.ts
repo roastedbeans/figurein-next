@@ -5,6 +5,7 @@ export type ElementType =
   | "arrow"
   | "text"
   | "icon"
+  | "image"
   | "path"
   | "frame";
 
@@ -56,26 +57,6 @@ export type CircleElement = BaseElement & {
   type: "circle";
 };
 
-export type LineElement = BaseElement & {
-  type: "line";
-  x2: number;
-  y2: number;
-  headStyle: "triangle" | "open" | "none";
-  tailStyle: "none" | "triangle" | "open";
-  lineStyle: "straight" | "curved" | "elbow";
-  cx?: number;
-  cy?: number;
-  elbowMidRatio?: number;
-  elbowCorners?: [number, number][];
-  startDir?: EdgeDir;
-  endDir?: EdgeDir;
-  /** Element ID that the start point is connected to */
-  startConnectedTo?: string;
-  /** Element ID that the end point is connected to */
-  endConnectedTo?: string;
-  label?: string;
-};
-
 export type EdgeDir = "up" | "down" | "left" | "right";
 
 export type ArrowElement = BaseElement & {
@@ -103,6 +84,9 @@ export type ArrowElement = BaseElement & {
   sourceLabel?: string;
   label?: string;
   targetLabel?: string;
+  sourceLabelOffset?: { dx: number; dy: number };
+  labelOffset?: { dx: number; dy: number };
+  targetLabelOffset?: { dx: number; dy: number };
 };
 
 export type TextElement = BaseElement & {
@@ -129,56 +113,51 @@ export type IconElement = BaseElement & {
   color: string;
 };
 
+/** Bitmap from the user's Images library (`upload:<uuid>`). */
+export type ImageElement = BaseElement & {
+  type: "image";
+  imageId: string;
+};
+
 export type PathElement = BaseElement & {
   type: "path";
   pathData: string; // SVG path d attribute
   viewBox: string; // e.g. "0 0 200 100"
-  /** Id of the originating FlowchartShape. Present when the element was
-   *  created from a preset; absent for AI-generated / freeform paths. */
+  /** Stencil preset id (`ShapeStencil.id`) when stamped from the library;
+   *  omitted for AI / freeform paths. */
   shapeId?: string;
 };
 
-/** Main-axis packing when layoutMode !== "none". Ignored otherwise — elements
- *  with an inert layoutMode keep their absolute child coords. */
-export type FrameMainAxisAlign =
-  | "start"
-  | "center"
-  | "end"
-  | "space-between";
-
-/** Cross-axis alignment; "stretch" makes children fill the cross dimension. */
-export type FrameCrossAxisAlign = "start" | "center" | "end" | "stretch";
-
-/** Hierarchical container. Children are addressed by id in `childIds`, with
- *  array order = z-order *within* the frame (independent of the top-level
- *  `zIndex` that orders frames and page-root elements against each other).
- *
- *  Step-2 semantics: `layoutMode` is always "none" in practice — children
- *  keep absolute coords and the frame renders without a transform. The
- *  layout fields exist so later steps can flip individual frames into
- *  auto-layout mode without another schema migration. */
+/** Hierarchical container. Children are addressed by id in `childIds`,
+ *  with array order = z-order *within* the frame. The frame is a labeled
+ *  section node — moving/deleting it carries its children. Visual style
+ *  comes from the standard fill/stroke fields plus optional cornerRadius;
+ *  `clipContent` masks overflowing children. AI uses frames to give
+ *  generated figures section semantics ("Authentication phase" rather
+ *  than 12 unrelated primitives). */
 export type FrameElement = BaseElement & {
   type: "frame";
   childIds: string[];
-  layoutMode: "none" | "vertical" | "horizontal";
-  /** Main-axis gap between children (auto-layout only). */
-  gap: number;
-  padding: { top: number; right: number; bottom: number; left: number };
-  mainAxisAlign: FrameMainAxisAlign;
-  crossAxisAlign: FrameCrossAxisAlign;
   /** Clip overflowing children to the frame bounds. */
   clipContent: boolean;
   /** Rounded corners on the frame background. */
   cornerRadius?: number;
+  // Auto-layout fields — kept for data compat with old documents written
+  // when auto-layout was experimental, but no longer read by any code path.
+  layoutMode?: "none" | "horizontal" | "vertical";
+  gap?: number;
+  padding?: { top: number; right: number; bottom: number; left: number };
+  mainAxisAlign?: "start" | "center" | "end" | "space-between";
+  crossAxisAlign?: "start" | "center" | "end" | "stretch";
 };
 
 export type EditorElement =
   | RectangleElement
   | CircleElement
-  | LineElement
   | ArrowElement
   | TextElement
   | IconElement
+  | ImageElement
   | PathElement
   | FrameElement;
 

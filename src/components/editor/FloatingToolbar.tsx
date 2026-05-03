@@ -19,6 +19,9 @@ import {
   AlignStartHorizontal,
   AlignCenterHorizontal,
   AlignEndHorizontal,
+  AlignVerticalJustifyCenter,
+  AlignHorizontalJustifyCenter,
+  LayoutGrid,
   Bold,
   Italic,
   ArrowUpToLine,
@@ -540,27 +543,50 @@ function TextPresetPicker({
 /** Contextual top toolbar — appears at the top-center of the canvas area
  *  whenever an element is selected and surfaces the selection's properties. */
 export function FloatingToolbar() {
+  const selectedIds = useEditorStore((s) => s.selectedElementIds);
   const element = useEditorStore((s) =>
     s.selectedElementId ? elementById(s.elements, s.selectedElementId) ?? null : null
   );
-  const editingConnectorId = useEditorStore((s) => s.editingConnectorId);
+  const editingConnectorLabel = useEditorStore((s) => s.editingConnectorLabel);
   const {
     updateElement,
     updateElementLive,
     deleteElement,
+    deleteElements,
     bringToFront,
     sendToBack,
     duplicateElement,
+    alignSelection,
+    distributeSelection,
+    tidySelection,
   } = useEditorStore(
     useShallow((s) => ({
       updateElement: s.updateElement,
       updateElementLive: s.updateElementLive,
       deleteElement: s.deleteElement,
+      deleteElements: s.deleteElements,
       bringToFront: s.bringToFront,
       sendToBack: s.sendToBack,
       duplicateElement: s.duplicateElement,
+      alignSelection: s.alignSelection,
+      distributeSelection: s.distributeSelection,
+      tidySelection: s.tidySelection,
     }))
   );
+
+  // Multi-select: alignment + distribution toolbar. The canvas is the
+  // implicit parent — no grouping required to align / distribute / delete.
+  if (selectedIds.length > 1) {
+    return (
+      <MultiSelectToolbar
+        ids={selectedIds}
+        onAlign={(axis) => alignSelection(selectedIds, axis)}
+        onDistribute={(axis) => distributeSelection(selectedIds, axis)}
+        onTidy={() => tidySelection(selectedIds)}
+        onDelete={() => deleteElements(selectedIds)}
+      />
+    );
+  }
 
   if (!element) return null;
 
@@ -571,7 +597,7 @@ export function FloatingToolbar() {
 
   // Width/height fields are meaningless for lines/arrows (those use x2/y2
   // endpoints instead), so only the position is editable for those types.
-  const isConnector = element.type === "line" || element.type === "arrow";
+  const isConnector = element.type === "arrow";
   const supportsAspectLock = !isConnector;
   const ratio =
     element.height > 0 ? element.width / element.height : 1;
@@ -677,7 +703,7 @@ export function FloatingToolbar() {
           onChange={(stroke) => update({ stroke })}
           onChangeLive={(stroke) => updateLive({ stroke })}
         />
-        {element.type !== "icon" && (
+        {element.type !== "icon" && element.type !== "image" && (
           <StrokeStylePicker
             value={element.strokeStyle ?? "solid"}
             onChange={(strokeStyle) => update({ strokeStyle })}
@@ -789,7 +815,7 @@ export function FloatingToolbar() {
         )}
 
         {/* Line / Arrow: path style + heads */}
-        {(element.type === "line" || element.type === "arrow") && (
+        {(element.type === "arrow") && (
           <>
             <Separator orientation="vertical" className="mx-0.5" />
             <LineStylePicker
@@ -834,7 +860,7 @@ export function FloatingToolbar() {
         )}
 
         {/* Connector labels */}
-        {(element.type === "line" || element.type === "arrow") && editingConnectorId !== element.id && (
+        {(element.type === "arrow") && editingConnectorLabel?.id !== element.id && (
           <>
             <Separator orientation="vertical" className="mx-0.5" />
             {element.type === "arrow" && (
@@ -942,6 +968,139 @@ export function FloatingToolbar() {
           size="icon-sm"
           title="Delete"
           onClick={() => deleteElement(element.id)}
+          className="text-destructive hover:bg-destructive/10 hover:text-destructive"
+        >
+          <Trash2 className="size-3.5" />
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+type AlignAxis =
+  | "left"
+  | "center-x"
+  | "right"
+  | "top"
+  | "center-y"
+  | "bottom";
+
+/** Multi-select variant of the floating toolbar. Surfaces the alignment +
+ *  distribution actions standard in Figma / Canva / similar — operating on
+ *  the selection's combined bbox without requiring a parent frame. */
+function MultiSelectToolbar({
+  ids,
+  onAlign,
+  onDistribute,
+  onTidy,
+  onDelete,
+}: {
+  ids: string[];
+  onAlign: (axis: AlignAxis) => void;
+  onDistribute: (axis: "horizontal" | "vertical") => void;
+  onTidy: () => void;
+  onDelete: () => void;
+}) {
+  // Distribution needs at least 3 elements (two endpoints + at least one
+  // interior to spread). With 2, the buttons go inert — they'd no-op.
+  const canDistribute = ids.length >= 3;
+  return (
+    <div className="pointer-events-auto absolute left-1/2 top-3 z-10 -translate-x-1/2">
+      <div className="flex items-center gap-0.5 rounded-lg border bg-background/95 p-1 shadow-[0_1px_0_rgb(255_255_255/0.6)_inset,0_8px_24px_-8px_rgb(0_0_0/0.18),0_2px_6px_-2px_rgb(0_0_0/0.08)] backdrop-blur">
+        <span className="px-1.5 text-[11px] font-medium text-muted-foreground">
+          {ids.length} selected
+        </span>
+        <Separator orientation="vertical" className="mx-0.5 h-5" />
+
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="Align left"
+          onClick={() => onAlign("left")}
+        >
+          <AlignLeft className="size-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="Align center horizontally"
+          onClick={() => onAlign("center-x")}
+        >
+          <AlignCenter className="size-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="Align right"
+          onClick={() => onAlign("right")}
+        >
+          <AlignRight className="size-3.5" />
+        </Button>
+
+        <Separator orientation="vertical" className="mx-0.5 h-5" />
+
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="Align top"
+          onClick={() => onAlign("top")}
+        >
+          <AlignStartHorizontal className="size-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="Align middle vertically"
+          onClick={() => onAlign("center-y")}
+        >
+          <AlignCenterHorizontal className="size-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="Align bottom"
+          onClick={() => onAlign("bottom")}
+        >
+          <AlignEndHorizontal className="size-3.5" />
+        </Button>
+
+        <Separator orientation="vertical" className="mx-0.5 h-5" />
+
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="Distribute horizontally (need 3+)"
+          onClick={() => onDistribute("horizontal")}
+          disabled={!canDistribute}
+        >
+          <AlignHorizontalJustifyCenter className="size-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="Distribute vertically (need 3+)"
+          onClick={() => onDistribute("vertical")}
+          disabled={!canDistribute}
+        >
+          <AlignVerticalJustifyCenter className="size-3.5" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="Even spacing both axes (need 3+)"
+          onClick={onTidy}
+          disabled={!canDistribute}
+        >
+          <LayoutGrid className="size-3.5" />
+        </Button>
+
+        <Separator orientation="vertical" className="mx-0.5 h-5" />
+
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          title="Delete selection"
+          onClick={onDelete}
           className="text-destructive hover:bg-destructive/10 hover:text-destructive"
         >
           <Trash2 className="size-3.5" />

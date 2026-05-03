@@ -1,5 +1,4 @@
 import iconsData from "@/lib/icons.json";
-import { useCustomIconsStore } from "@/stores/custom-icons-store";
 
 export type IconEntry = {
   id: string;
@@ -10,23 +9,6 @@ export type IconEntry = {
   tags: string[];
 };
 
-/** Custom icon IDs are stored on elements as `custom:<uuid>`. Everything
- *  else is a built-in IBM pictogram id. The prefix lets URL + render code
- *  route to the Supabase CDN instead of the bundled /ibm-icons folder. */
-export const CUSTOM_ICON_PREFIX = "custom:";
-
-export function isCustomIconId(iconId: string): boolean {
-  return iconId.startsWith(CUSTOM_ICON_PREFIX);
-}
-
-export function customIconIdFromUuid(uuid: string): string {
-  return `${CUSTOM_ICON_PREFIX}${uuid}`;
-}
-
-export function uuidFromCustomIconId(iconId: string): string {
-  return iconId.slice(CUSTOM_ICON_PREFIX.length);
-}
-
 function humanize(id: string): string {
   return id
     .replace(/^ibm-pictograms-/, "")
@@ -35,7 +17,10 @@ function humanize(id: string): string {
 }
 
 const allIcons: IconEntry[] = Object.entries(
-  iconsData.icons as Record<string, { path: string; width: number; height: number; tags: string[] }>
+  iconsData.icons as Record<
+    string,
+    { path: string; width: number; height: number; tags: string[] }
+  >
 ).map(([id, meta]) => ({
   id,
   label: humanize(id),
@@ -48,28 +33,20 @@ const allIcons: IconEntry[] = Object.entries(
 export { allIcons };
 
 export function getIconUrl(iconId: string): string {
-  if (isCustomIconId(iconId)) {
-    const uuid = uuidFromCustomIconId(iconId);
-    const entry = useCustomIconsStore.getState().getById(uuid);
-    return entry?.url ?? "";
-  }
   return `/ibm-icons/${iconId}.svg`;
 }
 
-/** Format hint for rendering: SVG icons can be mask-recolored; raster icons
- *  (PNG/JPG) must render as an image so the user's pixels come through. */
-export function getIconFormat(iconId: string): "svg" | "png" | "jpg" {
-  if (isCustomIconId(iconId)) {
-    const uuid = uuidFromCustomIconId(iconId);
-    const entry = useCustomIconsStore.getState().getById(uuid);
-    return entry?.format ?? "svg";
-  }
+/** Built-ins are always bundled SVG glyphs. User uploads belong in Images. */
+/** @param iconId IBM pictogram id (unused — all built-ins are SVG). */
+export function getIconFormat(iconId: string): "svg" {
+  void iconId;
   return "svg";
 }
 
 function matchesQuery(icon: IconEntry, terms: string[]): boolean {
   if (terms.length === 0) return true;
-  const haystack = `${icon.id} ${icon.label} ${icon.tags.join(" ")}`.toLowerCase();
+  const haystack =
+    `${icon.id} ${icon.label} ${icon.tags.join(" ")}`.toLowerCase();
   return terms.every((term) => haystack.includes(term));
 }
 

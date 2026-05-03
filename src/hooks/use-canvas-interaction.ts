@@ -2,8 +2,8 @@
 
 import { useCallback, useEffect, useRef, type RefObject } from "react";
 import { useEditorStore, setCanvasCursorPos, elementById } from "@/stores/editor-store";
-import type { EditorElement, ArrowElement, LineElement, EdgeDir } from "@/types/editor";
-import type { FlowchartShape } from "@/lib/flowchart-shapes";
+import type { EditorElement, ArrowElement, EdgeDir } from "@/types/editor";
+import type { ShapeStencil } from "@/lib/shape-stencils";
 import {
   DEFAULT_FILL,
   DEFAULT_STROKE,
@@ -22,6 +22,11 @@ import {
   getDefaultElbowCorners,
   cleanOrthogonalPath,
 } from "@/components/editor/elements/ArrowElement";
+import {
+  getPathContentFractions,
+  pathResizeAnchorOffsetFromCenter,
+} from "@/lib/path-element-geometry";
+import { elementConnectorBox } from "@/lib/connector-geometry";
 
 type GroupOrigPos = {
   id: string;
@@ -44,7 +49,7 @@ type PreDrawTool = "rectangle" | "circle" | "line" | "arrow" | "path";
 
 type InteractionMode =
   | { type: "none" }
-  | { type: "preDraw"; startX: number; startY: number; tool: PreDrawTool; startSnapDir?: EdgeDir; startConnectedTo?: string; pathShape?: FlowchartShape }
+  | { type: "preDraw"; startX: number; startY: number; tool: PreDrawTool; startSnapDir?: EdgeDir; startConnectedTo?: string; pathShape?: ShapeStencil }
   | { type: "drawing"; startX: number; startY: number; elementId: string; defaultW?: number; defaultH?: number }
   | { type: "moving"; startX: number; startY: number; origX: number; origY: number; origX2?: number; origY2?: number; origCx?: number; origCy?: number; origElbowCorners?: [number, number][]; groupOrigs?: GroupOrigPos[]; connectedOrigs?: ConnectorOrig[]; moved?: boolean }
   | { type: "resizing"; handle: string; startX: number; startY: number; orig: EditorElement; committed?: boolean }
@@ -66,7 +71,7 @@ function buildDrawingElement(opts: {
   y2: number;
   startSnapDir?: EdgeDir;
   startConnectedTo?: string;
-  pathShape?: FlowchartShape;
+  pathShape?: ShapeStencil;
   zIndex: number;
 }): EditorElement {
   const id = Math.random().toString(36).substring(2, 11);
@@ -102,9 +107,11 @@ function buildDrawingElement(opts: {
         strokeWidth: DEFAULT_STROKE_WIDTH,
       };
     case "line":
+      // Line tool produces an arrow with no head/tail — there is no longer
+      // a separate "line" element type; connectors are unified.
       return {
         ...base,
-        type: "line",
+        type: "arrow",
         x2: opts.x2,
         y2: opts.y2,
         width: 0,
@@ -135,26 +142,31 @@ function buildDrawingElement(opts: {
         startDir: opts.startSnapDir,
         startConnectedTo: opts.startConnectedTo,
       };
-    case "path":
+    case "path": {
+      const shape = opts.pathShape!;
+      const w = opts.width;
+      const h = opts.height;
+      const gen = shape.pathGenerator;
       return {
         ...base,
         type: "path",
-        width: opts.width,
-        height: opts.height,
+        width: w,
+        height: h,
         fill: DEFAULT_FILL,
         stroke: DEFAULT_STROKE,
         strokeWidth: DEFAULT_STROKE_WIDTH,
-        pathData: opts.pathShape!.pathData,
-        viewBox: opts.pathShape!.viewBox,
-        shapeId: opts.pathShape!.id,
+        pathData: gen ? gen(w, h) : shape.pathData,
+        viewBox: gen ? `0 0 ${w} ${h}` : shape.viewBox,
+        shapeId: shape.id,
       };
+    }
   }
 }
 
 /** Axis-aligned bounding box for marquee intersection testing. Lines/arrows
  *  are treated as the box spanning their two endpoints. */
 function elementBox(el: EditorElement) {
-  if (el.type === "line" || el.type === "arrow") {
+  if (el.type === "arrow") {
     const c = el as EditorElement & { x2: number; y2: number };
     return {
       minX: Math.min(c.x, c.x2),
@@ -280,11 +292,11 @@ function snapToElements(
   for (const el of elements) {
     if (el.id === excludeId) continue;
 
-    if (el.type === "line" || el.type === "arrow") {
+    if (el.type === "arrow") {
       // Build the polyline the connector actually follows, so projection
       // hits the visible geometry (not just the straight baseline for
       // elbow/curved styles).
-      const line = el as LineElement | ArrowElement;
+      const line = el as ArrowElement;
       const arrow = el.type === "arrow" ? (el as ArrowElement) : null;
       const pts: Array<[number, number]> = [[line.x, line.y]];
       if (arrow?.lineStyle === "elbow" && arrow.elbowCorners) {
@@ -337,10 +349,11 @@ function snapToElements(
       continue;
     }
 
-    const l = el.x;
-    const t = el.y;
-    const r = el.x + el.width;
-    const b = el.y + el.height;
+    const box = elementConnectorBox(el);
+    const l = box.x;
+    const t = box.y;
+    const r = box.x + box.w;
+    const b = box.y + box.h;
 
     const candidates: Array<{ x: number; y: number; dir: EdgeDir; edgeDist: number }> = [
       // Top edge — horizontal, y = t, x in [l, r]
@@ -467,7 +480,7 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
             // captures where the handle was at mousedown so the element
             // rotates *relative* to that grab point — grabbing the handle
             // doesn't cause a jump.
-            const isLine = el.type === "line" || el.type === "arrow";
+            const isLine = el.type === "arrow";
             let cx: number, cy: number;
             let origEndpoints: { x: number; y: number; x2: number; y2: number } | undefined;
             // For lines/arrows the "rotation" the user perceives is the
@@ -511,7 +524,7 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
           // Light up the rotation-handle glow while the user drags a line's
           // head or tail — the baseline angle is what changes, and the
           // indicator should behave the same as rotation-handle drags.
-          if ((el.type === "line" || el.type === "arrow") && (handle === "start" || handle === "end")) {
+          if ((el.type === "arrow") && (handle === "start" || handle === "end")) {
             state.setRotatingElementId(el.id);
           }
           return;
@@ -609,8 +622,8 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
             for (const id of [...bulkIds]) {
               const e = state.elements.find((x) => x.id === id);
               if (!e) continue;
-              if (e.type === "arrow" || e.type === "line") {
-                const conn = e as ArrowElement | LineElement;
+              if (e.type === "arrow") {
+                const conn = e as ArrowElement;
                 if (conn.startConnectedTo) bulkIds.add(conn.startConnectedTo);
                 if (conn.endConnectedTo) bulkIds.add(conn.endConnectedTo);
               }
@@ -625,8 +638,8 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
                 .filter((e) => bulkIds.has(e.id))
                 .map((e) => {
                   const base: GroupOrigPos = { id: e.id, x: e.x, y: e.y };
-                  if (e.type === "line" || e.type === "arrow") {
-                    const c = e as ArrowElement | LineElement;
+                  if (e.type === "arrow") {
+                    const c = e as ArrowElement;
                     base.x2 = c.x2;
                     base.y2 = c.y2;
                     if (e.type === "arrow") {
@@ -644,7 +657,7 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
                 });
             }
 
-            const isLineType = el.type === "line" || el.type === "arrow";
+            const isLineType = el.type === "arrow";
             const arrowEl = el.type === "arrow" ? (el as ArrowElement) : null;
 
             // connectedOrigs: connectors outside the bulk that reference
@@ -653,8 +666,8 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
             // connector can be anchored to a shape OR to another connector
             // (line-to-line snap), so we don't gate on element type here.
             let connectedOrigs: ConnectorOrig[] | undefined;
-            const connectors = state.elements.filter((e): e is ArrowElement | LineElement => {
-              if (e.type !== "arrow" && e.type !== "line") return false;
+            const connectors = state.elements.filter((e): e is ArrowElement => {
+              if (e.type !== "arrow") return false;
               if (bulkIds.has(e.id)) return false;
               const c = e as ArrowElement;
               return (
@@ -673,6 +686,7 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
                 endConnectedTo: (c as ArrowElement).endConnectedTo,
               }));
             }
+
             modeRef.current = {
               type: "moving",
               startX: pt.x,
@@ -883,7 +897,7 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
         const el = elementById(state.elements, mode.elementId);
         if (!el) return;
 
-        if (el.type === "line" || el.type === "arrow") {
+        if (el.type === "arrow") {
           // Snap endpoint to a designated connection point, else fall back
           // to the grid. The four-midpoint snap already returns exact edge
           // coordinates — no additional axis-snapping needed.
@@ -977,7 +991,15 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
 
           // Collect DOM nodes for imperative CSS transforms (single-element
           // drag only — group drag keeps the React path for all its highlights).
-          if (!mode.groupOrigs) {
+          // Also skip when any external connector is bound to the dragged
+          // element: bound arrows can't follow on the CSS path because their
+          // renderer reads the bound element's STORE position via
+          // resolveConnectorEndpoints, and that position is frozen until
+          // mouseup. Fall through to the per-frame store update so arrows
+          // reroute in real time.
+          const hasFollowingConnectors =
+            mode.connectedOrigs !== undefined && mode.connectedOrigs.length > 0;
+          if (!mode.groupOrigs && !hasFollowingConnectors) {
             const svg = svgRef.current;
             if (svg) {
               const nodes: SVGGElement[] = [];
@@ -1073,7 +1095,7 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
         const tol = 2;
         if (mode.connectedOrigs && movingIds.size > 0) {
           for (const orig of mode.connectedOrigs) {
-            const conn = elementById(state.elements, orig.id) as ArrowElement | LineElement | undefined;
+            const conn = elementById(state.elements, orig.id) as ArrowElement | undefined;
             if (!conn) continue;
             const upd: Record<string, unknown> = {};
 
@@ -1251,7 +1273,7 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
           mode.committed = true;
         }
 
-        const isLine = orig.type === "line" || orig.type === "arrow";
+        const isLine = orig.type === "arrow";
         if (isLine) {
           // Control point drag for curved lines/arrows (free 2D)
           if (mode.handle === "control") {
@@ -1375,7 +1397,7 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
           // endpoint onto that ray (projected). The endpoint "sticks" until
           // the pointer leaves the band — a drag delay, not an angular
           // snap-zone. Edge-snap and Shift bypass it.
-          if (!useEdge && !e.shiftKey && (orig.type === "line" || orig.type === "arrow")) {
+          if (!useEdge && !e.shiftKey && (orig.type === "arrow")) {
             const origLine = orig as EditorElement & { x2: number; y2: number };
             const fx = mode.handle === "start" ? origLine.x2 : origLine.x;
             const fy = mode.handle === "start" ? origLine.y2 : origLine.y;
@@ -1398,7 +1420,7 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
           }
           if (mode.handle === "start") {
             const updates: Partial<EditorElement> = { x: final.x, y: final.y };
-            if (orig.type === "arrow" || orig.type === "line") {
+            if (orig.type === "arrow") {
               const newDir = useEdge ? elemSnap.dir : undefined;
               (updates as Record<string, unknown>).startDir = newDir;
               (updates as Record<string, unknown>).startConnectedTo = useEdge && elemSnap.bindable ? elemSnap.elementId : undefined;
@@ -1427,7 +1449,7 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
             state.updateElementLive(orig.id, updates);
           } else {
             const updates: Partial<EditorElement> = { x2: final.x, y2: final.y };
-            if (orig.type === "arrow" || orig.type === "line") {
+            if (orig.type === "arrow") {
               const newDir = useEdge ? elemSnap.dir : undefined;
               (updates as Record<string, unknown>).endDir = newDir;
               (updates as Record<string, unknown>).endConnectedTo = useEdge && elemSnap.bindable ? elemSnap.elementId : undefined;
@@ -1461,45 +1483,72 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
 
         // For shapes: snap the edge being dragged to the grid
         // Compute raw new bounds, then snap the moving edge
-        let newX = orig.x;
-        let newY = orig.y;
-        let newW = orig.width;
-        let newH = orig.height;
+        const aspectLock = e.shiftKey || orig.aspectLocked === true;
+        let pathFracs = null as ReturnType<typeof getPathContentFractions> | null;
+        let resizeRef = orig;
+        if (
+          orig.type === "path" &&
+          !aspectLock &&
+          orig.width > 0 &&
+          orig.height > 0
+        ) {
+          pathFracs = getPathContentFractions(orig);
+          if (
+            pathFracs &&
+            pathFracs.frw > 1e-9 &&
+            pathFracs.frh > 1e-9
+          ) {
+            resizeRef = {
+              ...orig,
+              x: orig.x + pathFracs.frx * orig.width,
+              y: orig.y + pathFracs.fry * orig.height,
+              width: pathFracs.frw * orig.width,
+              height: pathFracs.frh * orig.height,
+            };
+          } else {
+            pathFracs = null;
+          }
+        }
+
+        let newX = resizeRef.x;
+        let newY = resizeRef.y;
+        let newW = resizeRef.width;
+        let newH = resizeRef.height;
 
         switch (mode.handle) {
           case "top-left":
-            newX = snap(orig.x + localDx);
-            newY = snap(orig.y + localDy);
-            newW = orig.x + orig.width - newX;
-            newH = orig.y + orig.height - newY;
+            newX = snap(resizeRef.x + localDx);
+            newY = snap(resizeRef.y + localDy);
+            newW = resizeRef.x + resizeRef.width - newX;
+            newH = resizeRef.y + resizeRef.height - newY;
             break;
           case "top":
-            newY = snap(orig.y + localDy);
-            newH = orig.y + orig.height - newY;
+            newY = snap(resizeRef.y + localDy);
+            newH = resizeRef.y + resizeRef.height - newY;
             break;
           case "top-right":
-            newY = snap(orig.y + localDy);
-            newW = snap(orig.x + orig.width + localDx) - orig.x;
-            newH = orig.y + orig.height - newY;
+            newY = snap(resizeRef.y + localDy);
+            newW = snap(resizeRef.x + resizeRef.width + localDx) - resizeRef.x;
+            newH = resizeRef.y + resizeRef.height - newY;
             break;
           case "right":
-            newW = snap(orig.x + orig.width + localDx) - orig.x;
+            newW = snap(resizeRef.x + resizeRef.width + localDx) - resizeRef.x;
             break;
           case "bottom-right":
-            newW = snap(orig.x + orig.width + localDx) - orig.x;
-            newH = snap(orig.y + orig.height + localDy) - orig.y;
+            newW = snap(resizeRef.x + resizeRef.width + localDx) - resizeRef.x;
+            newH = snap(resizeRef.y + resizeRef.height + localDy) - resizeRef.y;
             break;
           case "bottom":
-            newH = snap(orig.y + orig.height + localDy) - orig.y;
+            newH = snap(resizeRef.y + resizeRef.height + localDy) - resizeRef.y;
             break;
           case "bottom-left":
-            newX = snap(orig.x + localDx);
-            newW = orig.x + orig.width - newX;
-            newH = snap(orig.y + orig.height + localDy) - orig.y;
+            newX = snap(resizeRef.x + localDx);
+            newW = resizeRef.x + resizeRef.width - newX;
+            newH = snap(resizeRef.y + resizeRef.height + localDy) - resizeRef.y;
             break;
           case "left":
-            newX = snap(orig.x + localDx);
-            newW = orig.x + orig.width - newX;
+            newX = snap(resizeRef.x + localDx);
+            newW = resizeRef.x + resizeRef.width - newX;
             break;
         }
 
@@ -1512,7 +1561,6 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
         // the pointer moved along the diagonal. Edge handles: scale the
         // perpendicular axis from the already-snapped driver so there is
         // only one snap source.
-        const aspectLock = e.shiftKey || orig.aspectLocked === true;
         if (aspectLock && orig.width > 0 && orig.height > 0) {
           const ratio = orig.width / orig.height;
           const isCorner =
@@ -1523,26 +1571,26 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
           if (isCorner) {
             const sx = mode.handle.includes("left") ? -1 : 1;
             const sy = mode.handle.includes("top") ? -1 : 1;
-            const anchorX = sx === -1 ? orig.x + orig.width : orig.x;
-            const anchorY = sy === -1 ? orig.y + orig.height : orig.y;
+            const anchorX = sx === -1 ? resizeRef.x + resizeRef.width : resizeRef.x;
+            const anchorY = sy === -1 ? resizeRef.y + resizeRef.height : resizeRef.y;
             // Diagonal vector from anchor to the handle in its original pos
-            const dirX = sx * orig.width;
-            const dirY = sy * orig.height;
+            const dirX = sx * resizeRef.width;
+            const dirY = sy * resizeRef.height;
             const diagLen = Math.hypot(dirX, dirY);
             // Scalar projection of the pointer displacement along the
             // diagonal. Positive = handle moves away from anchor (grow).
             const proj = (localDx * dirX + localDy * dirY) / diagLen;
             let scale = (diagLen + proj) / diagLen;
             // Floor the scale so the element can't invert or collapse.
-            const minScale = GRID_SIZE / Math.max(orig.width, orig.height);
+            const minScale = GRID_SIZE / Math.max(resizeRef.width, resizeRef.height);
             if (scale < minScale) scale = minScale;
             // Snap the longer side to the grid, derive the shorter from the
             // ratio. One snap source → no axis-switch jitter.
-            if (orig.width >= orig.height) {
-              newW = snap(orig.width * scale);
+            if (resizeRef.width >= resizeRef.height) {
+              newW = snap(resizeRef.width * scale);
               newH = newW / ratio;
             } else {
-              newH = snap(orig.height * scale);
+              newH = snap(resizeRef.height * scale);
               newW = newH * ratio;
             }
             newX = sx === -1 ? anchorX - newW : anchorX;
@@ -1551,11 +1599,19 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
             newH = newW / ratio;
             // Keep vertical center fixed so the element grows symmetrically
             // around the horizontal axis line it was previously centered on.
-            newY = orig.y + (orig.height - newH) / 2;
+            newY = resizeRef.y + (resizeRef.height - newH) / 2;
           } else if (mode.handle === "top" || mode.handle === "bottom") {
             newW = newH * ratio;
-            newX = orig.x + (orig.width - newW) / 2;
+            newX = resizeRef.x + (resizeRef.width - newW) / 2;
           }
+        }
+
+        if (pathFracs && pathFracs.frw > 1e-9 && pathFracs.frh > 1e-9) {
+          const { frx, fry, frw, frh } = pathFracs;
+          newW = newW / frw;
+          newH = newH / frh;
+          newX = newX - frx * newW;
+          newY = newY - fry * newH;
         }
 
         // Ensure minimum size (at least one grid cell)
@@ -1577,31 +1633,65 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
         // its original world-space location — making the drag feel like
         // it extends along the element's rotated axis.
         if (rot !== 0) {
-          const handleAnchor: Record<string, [number, number]> = {
-            "top-left": [1, 1],
-            top: [0, 1],
-            "top-right": [-1, 1],
-            right: [-1, 0],
-            "bottom-right": [-1, -1],
-            bottom: [0, -1],
-            "bottom-left": [1, -1],
-            left: [1, 0],
-          };
-          const anchor = handleAnchor[mode.handle];
-          if (anchor) {
-            const [sgnX, sgnY] = anchor;
+          if (
+            pathFracs &&
+            pathFracs.frw > 1e-9 &&
+            pathFracs.frh > 1e-9
+          ) {
+            const { frx, fry, frw, frh } = pathFracs;
             const oldCx = orig.x + orig.width / 2;
             const oldCy = orig.y + orig.height / 2;
-            const offOldX = (sgnX * orig.width) / 2;
-            const offOldY = (sgnY * orig.height) / 2;
+            const { ox: offOldX, oy: offOldY } = pathResizeAnchorOffsetFromCenter(
+              mode.handle,
+              frx,
+              fry,
+              frw,
+              frh,
+              orig.width,
+              orig.height
+            );
             const worldAnchorX = oldCx + cosR * offOldX - sinR * offOldY;
             const worldAnchorY = oldCy + sinR * offOldX + cosR * offOldY;
-            const offNewX = (sgnX * newW) / 2;
-            const offNewY = (sgnY * newH) / 2;
+            const { ox: offNewX, oy: offNewY } = pathResizeAnchorOffsetFromCenter(
+              mode.handle,
+              frx,
+              fry,
+              frw,
+              frh,
+              newW,
+              newH
+            );
             const newCx = worldAnchorX - (cosR * offNewX - sinR * offNewY);
             const newCy = worldAnchorY - (sinR * offNewX + cosR * offNewY);
             newX = newCx - newW / 2;
             newY = newCy - newH / 2;
+          } else {
+            const handleAnchor: Record<string, [number, number]> = {
+              "top-left": [1, 1],
+              top: [0, 1],
+              "top-right": [-1, 1],
+              right: [-1, 0],
+              "bottom-right": [-1, -1],
+              bottom: [0, -1],
+              "bottom-left": [1, -1],
+              left: [1, 0],
+            };
+            const anchor = handleAnchor[mode.handle];
+            if (anchor) {
+              const [sgnX, sgnY] = anchor;
+              const oldCx = orig.x + orig.width / 2;
+              const oldCy = orig.y + orig.height / 2;
+              const offOldX = (sgnX * orig.width) / 2;
+              const offOldY = (sgnY * orig.height) / 2;
+              const worldAnchorX = oldCx + cosR * offOldX - sinR * offOldY;
+              const worldAnchorY = oldCy + sinR * offOldX + cosR * offOldY;
+              const offNewX = (sgnX * newW) / 2;
+              const offNewY = (sgnY * newH) / 2;
+              const newCx = worldAnchorX - (cosR * offNewX - sinR * offNewY);
+              const newCy = worldAnchorY - (sinR * offNewX + cosR * offNewY);
+              newX = newCx - newW / 2;
+              newY = newCy - newH / 2;
+            }
           }
         }
 
@@ -1903,8 +1993,8 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
       if (!el) return;
 
       // Double-click on a connector → open the center label editor
-      if (el.type === "arrow" || el.type === "line") {
-        state.setEditingConnectorId(elementId);
+      if (el.type === "arrow") {
+        state.setEditingConnectorLabel({ id: elementId, role: "center" });
         return;
       }
 

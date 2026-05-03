@@ -134,6 +134,30 @@ export function useKeyboardShortcuts() {
         state.groupElements(state.selectedElementIds);
         return;
       }
+
+      // Toggle grid: Shift+` (Backquote)
+      if (e.shiftKey && !mod && code === "Backquote") {
+        e.preventDefault();
+        e.stopPropagation();
+        state.toggleGrid();
+        return;
+      }
+
+      // Default view — centered artboard at 100% zoom: Shift+1
+      if (e.shiftKey && !mod && (code === "Digit1" || key === "!")) {
+        e.preventDefault();
+        e.stopPropagation();
+        state.resetToDefaultView();
+        return;
+      }
+
+      // Fit all to view: Shift+2
+      if (e.shiftKey && !mod && (code === "Digit2" || key === "@")) {
+        e.preventDefault();
+        e.stopPropagation();
+        state.fitView();
+        return;
+      }
     };
 
     // Register on BOTH document and window, capture phase, so we run before
