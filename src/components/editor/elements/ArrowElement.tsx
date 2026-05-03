@@ -2,6 +2,8 @@ import { memo } from "react";
 import type { ArrowElement as ArrowElementType, EdgeDir } from "@/types/editor";
 import { GRID_SIZE } from "@/lib/constants";
 import { strokeDashArray, strokeLineCap } from "@/lib/stroke";
+import { elementById, useEditorStore } from "@/stores/editor-store";
+import { resolveConnectorEndpoints } from "@/lib/connector-geometry";
 
 /** Half-angle (from centerline to side edge) of each arrowhead style. Used
  *  both to draw the arrowhead and to compute the trim distance so the line
@@ -32,29 +34,6 @@ export function getDefaultControlPoint(
   const nx = -dy / len;
   const ny = dx / len;
   return { cx: mx + nx * offset, cy: my + ny * offset };
-}
-
-/** Compute the default elbow control point.
- *  The gap from element edges comes from offsetting cpx/cpy in the exit direction. */
-export function getDefaultElbowControlPoint(
-  x: number, y: number, x2: number, y2: number,
-  startDir?: EdgeDir, endDir?: EdgeDir
-): { cx: number; cy: number } {
-  const gap = GRID_SIZE * 2;
-  const sOff = startDir ? dirToOffset(startDir, gap) : { dx: 0, dy: 0 };
-  const eOff = endDir ? dirToOffset(endDir, gap) : { dx: 0, dy: 0 };
-
-  let cx = (x + sOff.dx + x2 + eOff.dx) / 2;
-  let cy = (y + sOff.dy + y2 + eOff.dy) / 2;
-
-  // Same direction: extend further to create proper U / C shapes
-  if (startDir && endDir && startDir === endDir) {
-    const extra = dirToOffset(startDir, GRID_SIZE * 3);
-    cx = (x + extra.dx + x2 + extra.dx) / 2;
-    cy = (y + extra.dy + y2 + extra.dy) / 2;
-  }
-
-  return { cx, cy };
 }
 
 export type ElbowSegmentHandle = {
@@ -365,7 +344,7 @@ function openArrowheadPath(
 // ---------------------------------------------------------------------------
 
 /** Parse an SVG path "M x y L x y L x y ..." into point array */
-function parsePathPoints(d: string): [number, number][] {
+export function parsePathPoints(d: string): [number, number][] {
   return d.split(/[MLQ]\s*/).filter(Boolean).map(s => {
     const nums = s.trim().split(/[\s,]+/).map(Number);
     // For Q commands there are 4 numbers (cx cy x y) — take the last pair
@@ -442,6 +421,101 @@ function buildTrimmedPath(
 }
 
 // ---------------------------------------------------------------------------
+// Label position helpers
+// ---------------------------------------------------------------------------
+
+export type ConnectorLabelPositions = {
+  center: { x: number; y: number };
+  source: { x: number; y: number };
+  target: { x: number; y: number };
+};
+
+/** Compute the three anchor positions for connector labels.
+ *  Pass `fullPath` (from `buildPath`) to skip re-running elbow routing.
+ *  All coordinates are in canvas (SVG world) space. */
+export function computeLabelPositions(
+  element: ArrowElementType,
+  fullPath?: string
+): ConnectorLabelPositions {
+  const { x, y, x2, y2 } = element;
+  const style = element.lineStyle || "straight";
+
+  // Center label position
+  let centerX: number;
+  let centerY: number;
+  if (style === "curved") {
+    const dp = getDefaultControlPoint(x, y, x2, y2);
+    const cpx = element.cx ?? dp.cx;
+    const cpy = element.cy ?? dp.cy;
+    centerX = 0.25 * x + 0.5 * cpx + 0.25 * x2;
+    centerY = 0.25 * y + 0.5 * cpy + 0.25 * y2;
+  } else if (style === "elbow") {
+    const d = fullPath ?? buildPath(element);
+    const pts = parsePathPoints(d);
+    let maxLen = -1;
+    centerX = (x + x2) / 2;
+    centerY = (y + y2) / 2;
+    for (let i = 1; i < pts.length; i++) {
+      const segLen =
+        Math.abs(pts[i][0] - pts[i - 1][0]) +
+        Math.abs(pts[i][1] - pts[i - 1][1]);
+      if (segLen > maxLen) {
+        maxLen = segLen;
+        centerX = (pts[i][0] + pts[i - 1][0]) / 2;
+        centerY = (pts[i][1] + pts[i - 1][1]) / 2;
+      }
+    }
+  } else {
+    centerX = (x + x2) / 2;
+    centerY = (y + y2) / 2;
+  }
+
+  // Forward angles — direction of travel leaving start and arriving at end
+  let fwdStart: number;
+  let fwdEnd: number;
+  if (style === "curved") {
+    const dp = getDefaultControlPoint(x, y, x2, y2);
+    const cpx = element.cx ?? dp.cx;
+    const cpy = element.cy ?? dp.cy;
+    fwdStart = Math.atan2(cpy - y, cpx - x);
+    fwdEnd = Math.atan2(y2 - cpy, x2 - cpx);
+  } else if (style === "elbow") {
+    const d = fullPath ?? buildPath(element);
+    const segs = parsePathPoints(d);
+    if (segs.length >= 2) {
+      fwdStart = Math.atan2(segs[1][1] - segs[0][1], segs[1][0] - segs[0][0]);
+      const last = segs.length - 1;
+      fwdEnd = Math.atan2(
+        segs[last][1] - segs[last - 1][1],
+        segs[last][0] - segs[last - 1][0]
+      );
+    } else {
+      fwdStart = Math.atan2(y2 - y, x2 - x);
+      fwdEnd = fwdStart;
+    }
+  } else {
+    fwdStart = Math.atan2(y2 - y, x2 - x);
+    fwdEnd = fwdStart;
+  }
+
+  // 24px along from endpoint + 12px perpendicular (90° CW = visually above a
+  // horizontal line; consistent for any orientation)
+  const ALONG = 24;
+  const PERP = 12;
+  return {
+    center: { x: centerX, y: centerY },
+    source: {
+      x: x + Math.cos(fwdStart) * ALONG + Math.sin(fwdStart) * PERP,
+      y: y + Math.sin(fwdStart) * ALONG - Math.cos(fwdStart) * PERP,
+    },
+    target: {
+      x: x2 - Math.cos(fwdEnd) * ALONG + Math.sin(fwdEnd) * PERP,
+      y: y2 - Math.sin(fwdEnd) * ALONG - Math.cos(fwdEnd) * PERP,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Elbow segment handles — per-segment draggable midpoints
 // ---------------------------------------------------------------------------
 
@@ -483,33 +557,94 @@ export function getElbowSegmentHandles(element: ArrowElementType): ElbowSegmentH
 // Component
 // ---------------------------------------------------------------------------
 
+/** Renders a single connector label: white background rect + text. */
+function LabelNode({
+  text,
+  pos,
+  stroke,
+}: {
+  text: string;
+  pos: { x: number; y: number };
+  stroke: string;
+}) {
+  const PAD = 3;
+  const w = Math.max(20, text.length * 7) + PAD * 2;
+  const h = 16;
+  return (
+    <g pointerEvents="none">
+      <rect
+        x={pos.x - w / 2}
+        y={pos.y - h / 2}
+        width={w}
+        height={h}
+        rx={2}
+        fill="white"
+        opacity={0.85}
+      />
+      <text
+        x={pos.x}
+        y={pos.y}
+        textAnchor="middle"
+        dominantBaseline="middle"
+        fontSize={12}
+        fill={stroke}
+        fontFamily="inherit"
+      >
+        {text}
+      </text>
+    </g>
+  );
+}
+
 function ArrowElementImpl({ element, dataId }: { element: ArrowElementType; dataId?: string }) {
-  const fullPath = buildPath(element);
-  const headSize = Math.max(element.strokeWidth * 4, 8);
-  const trimmedPath = buildTrimmedPath(element, headSize, fullPath);
+  // Subscribe to the bound elements so a resize / move of the connector's
+  // target re-renders us. `elementById` returns a stable reference when the
+  // element hasn't changed, so an unrelated mutation on the store doesn't
+  // cause this component to re-render.
+  const startBound = useEditorStore((s) =>
+    element.startConnectedTo
+      ? elementById(s.elements, element.startConnectedTo) ?? null
+      : null
+  );
+  const endBound = useEditorStore((s) =>
+    element.endConnectedTo
+      ? elementById(s.elements, element.endConnectedTo) ?? null
+      : null
+  );
+  const resolved = resolveConnectorEndpoints(element, startBound, endBound);
+
+  const updateElement = useEditorStore((s) => s.updateElement);
+  const editingConnectorId = useEditorStore((s) => s.editingConnectorId);
+  const setEditingConnectorId = useEditorStore((s) => s.setEditingConnectorId);
+  const isEditing = editingConnectorId === element.id;
+
+  const fullPath = buildPath(resolved);
+  const headSize = Math.max(resolved.strokeWidth * 4, 8);
+  const trimmedPath = buildTrimmedPath(resolved, headSize, fullPath);
+  const labelPositions = computeLabelPositions(resolved, fullPath);
 
   // Compute arrowhead at end
   let headNode: React.ReactNode = null;
-  if (element.headStyle === "triangle") {
-    const angle = getEndAngle(element, fullPath);
+  if (resolved.headStyle === "triangle") {
+    const angle = getEndAngle(resolved, fullPath);
     headNode = (
       <polygon
-        points={arrowheadPoints(element.x2, element.y2, angle, headSize)}
-        fill={element.stroke}
+        points={arrowheadPoints(resolved.x2, resolved.y2, angle, headSize)}
+        fill={resolved.stroke}
         stroke="none"
-        opacity={element.opacity}
+        opacity={resolved.opacity}
         pointerEvents="none"
       />
     );
-  } else if (element.headStyle === "open") {
-    const angle = getEndAngle(element, fullPath);
+  } else if (resolved.headStyle === "open") {
+    const angle = getEndAngle(resolved, fullPath);
     headNode = (
       <path
-        d={openArrowheadPath(element.x2, element.y2, angle, headSize)}
+        d={openArrowheadPath(resolved.x2, resolved.y2, angle, headSize)}
         fill="none"
-        stroke={element.stroke}
-        strokeWidth={element.strokeWidth}
-        opacity={element.opacity}
+        stroke={resolved.stroke}
+        strokeWidth={resolved.strokeWidth}
+        opacity={resolved.opacity}
         strokeLinecap="butt"
         strokeLinejoin="miter"
         pointerEvents="none"
@@ -519,26 +654,26 @@ function ArrowElementImpl({ element, dataId }: { element: ArrowElementType; data
 
   // Compute arrowhead at start (tail)
   let tailNode: React.ReactNode = null;
-  if (element.tailStyle === "triangle") {
-    const angle = getStartAngle(element, fullPath);
+  if (resolved.tailStyle === "triangle") {
+    const angle = getStartAngle(resolved, fullPath);
     tailNode = (
       <polygon
-        points={arrowheadPoints(element.x, element.y, angle, headSize)}
-        fill={element.stroke}
+        points={arrowheadPoints(resolved.x, resolved.y, angle, headSize)}
+        fill={resolved.stroke}
         stroke="none"
-        opacity={element.opacity}
+        opacity={resolved.opacity}
         pointerEvents="none"
       />
     );
-  } else if (element.tailStyle === "open") {
-    const angle = getStartAngle(element, fullPath);
+  } else if (resolved.tailStyle === "open") {
+    const angle = getStartAngle(resolved, fullPath);
     tailNode = (
       <path
-        d={openArrowheadPath(element.x, element.y, angle, headSize)}
+        d={openArrowheadPath(resolved.x, resolved.y, angle, headSize)}
         fill="none"
-        stroke={element.stroke}
-        strokeWidth={element.strokeWidth}
-        opacity={element.opacity}
+        stroke={resolved.stroke}
+        strokeWidth={resolved.strokeWidth}
+        opacity={resolved.opacity}
         strokeLinecap="butt"
         strokeLinejoin="miter"
         pointerEvents="none"
@@ -553,7 +688,7 @@ function ArrowElementImpl({ element, dataId }: { element: ArrowElementType; data
         d={fullPath}
         fill="none"
         stroke="transparent"
-        strokeWidth={Math.max(element.strokeWidth, 2) + 12}
+        strokeWidth={Math.max(resolved.strokeWidth, 2) + 12}
         strokeLinecap="butt"
         strokeLinejoin="miter"
       />
@@ -561,16 +696,87 @@ function ArrowElementImpl({ element, dataId }: { element: ArrowElementType; data
       <path
         d={trimmedPath}
         fill="none"
-        stroke={element.stroke}
-        strokeWidth={element.strokeWidth}
-        strokeDasharray={strokeDashArray(element.strokeStyle, element.strokeWidth)}
-        opacity={element.opacity}
-        strokeLinecap={strokeLineCap(element.strokeStyle)}
+        stroke={resolved.stroke}
+        strokeWidth={resolved.strokeWidth}
+        strokeDasharray={strokeDashArray(resolved.strokeStyle, resolved.strokeWidth)}
+        opacity={resolved.opacity}
+        strokeLinecap={strokeLineCap(resolved.strokeStyle)}
         strokeLinejoin="miter"
         pointerEvents="none"
       />
       {headNode}
       {tailNode}
+      {/* Connector labels */}
+      {resolved.sourceLabel && (
+        <LabelNode
+          text={resolved.sourceLabel}
+          pos={labelPositions.source}
+          stroke={resolved.stroke}
+        />
+      )}
+      {resolved.label && !isEditing && (
+        <LabelNode
+          text={resolved.label}
+          pos={labelPositions.center}
+          stroke={resolved.stroke}
+        />
+      )}
+      {resolved.targetLabel && (
+        <LabelNode
+          text={resolved.targetLabel}
+          pos={labelPositions.target}
+          stroke={resolved.stroke}
+        />
+      )}
+      {/* Inline center-label editor (activated by double-click) */}
+      {isEditing && (
+        <foreignObject
+          x={labelPositions.center.x - 60}
+          y={labelPositions.center.y - 12}
+          width={120}
+          height={24}
+          style={{ overflow: "visible" }}
+        >
+          <div style={{ width: "120px" }}>
+            <input
+              type="text"
+              autoFocus
+              defaultValue={resolved.label ?? ""}
+              onBlur={(e) => {
+                updateElement(element.id, {
+                  label: e.currentTarget.value.trim() || undefined,
+                });
+                setEditingConnectorId(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  updateElement(element.id, {
+                    label: e.currentTarget.value.trim() || undefined,
+                  });
+                  setEditingConnectorId(null);
+                  e.currentTarget.blur();
+                }
+                if (e.key === "Escape") {
+                  setEditingConnectorId(null);
+                  e.currentTarget.blur();
+                }
+                e.stopPropagation();
+              }}
+              style={{
+                width: "100%",
+                fontSize: "12px",
+                textAlign: "center",
+                border: "1px solid hsl(221 83% 53%)",
+                borderRadius: "4px",
+                padding: "2px 4px",
+                outline: "none",
+                background: "white",
+                boxSizing: "border-box" as const,
+              }}
+            />
+          </div>
+        </foreignObject>
+      )}
     </g>
   );
 }
