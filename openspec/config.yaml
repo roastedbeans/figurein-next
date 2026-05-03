@@ -1,0 +1,15 @@
+schema: spec-driven
+
+context: |
+  Next.js App Router canvas editor (`src/components/editor`). State: Zustand
+  (`src/stores/editor-store.ts`). Popovers use Base UI primitives in `src/components/ui/`.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours

@@ -1,5 +1,6 @@
 "use client";
 
+/** OpenSpec baseline: openspec/changes/editor-replace-popover/specs/editor-replace-popover/spec.md */
 import { useMemo, useState } from "react";
 import {
   Popover,
