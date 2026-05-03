@@ -1,13 +1,20 @@
 import { create } from "zustand";
-import type { EditorElement, Tool, CanvasState } from "@/types/editor";
+import type {
+  ArrowElement,
+  EditorElement,
+  LineElement,
+  Tool,
+  CanvasState,
+} from "@/types/editor";
 import {
-  CANVAS_HEIGHT,
-  CANVAS_WIDTH,
   HISTORY_LIMIT,
+  MIN_ZOOM,
+  MAX_ZOOM,
   type TextVariant,
 } from "@/lib/constants";
 import type { FlowchartShape } from "@/lib/flowchart-shapes";
 import { applyCascadeReflow, type PlannedSnapshot } from "@/lib/reflow";
+import { resolveConnectorWithMap } from "@/lib/connector-geometry";
 
 export type MarqueeRect = { x: number; y: number; w: number; h: number };
 
@@ -108,6 +115,7 @@ type EditorStore = {
    *  Also re-clamps the current pan — a shrinking window can push the
    *  existing pan out of bounds. */
   setViewportSize: (width: number, height: number) => void;
+  fitView: () => void;
   showGrid: boolean;
   toggleGrid: () => void;
 
@@ -156,6 +164,8 @@ type EditorStore = {
    *  text-format toolbar overlay. */
   editingTextId: string | null;
   setEditingTextId: (id: string | null) => void;
+  editingConnectorId: string | null;
+  setEditingConnectorId: (id: string | null) => void;
   /** One-shot signal: the text element whose id matches should auto-enter
    *  edit mode on mount with its entire content selected, so the user can
    *  type and immediately replace the placeholder. TextElement clears this
@@ -230,7 +240,7 @@ export type ReplaceTemplate =
   | { kind: "icon"; iconId: string }
   | { kind: "rectangle" }
   | { kind: "circle" }
-  | { kind: "flowchart"; pathData: string; viewBox: string };
+  | { kind: "flowchart"; pathData: string; viewBox: string; shapeId?: string };
 
 export type SerializedPage = {
   id: string;
@@ -304,103 +314,6 @@ function pageSignature(page: { title: string; elements: EditorElement[] }): stri
   return JSON.stringify({ title: page.title, elements: page.elements });
 }
 
-/** Minimum gap, in screen pixels, between the outermost canvas edge and
- *  the corresponding viewport edge at the clamp extreme. "Pan as far as
- *  the canvas edge, then stop 16px short" — the edge is always at least
- *  this visible, never flush to the viewport border. */
-const PAN_EDGE_PADDING = 16;
-
-/** World-space bounds the clamp should respect: the base page (tile 0,0)
- *  plus any additional tiles the element layout has spilled into. Canvas
- *  renders a white sheet under each tile, so the clamp has to follow
- *  those sheets out — otherwise an element on tile (1,0) would sit in a
- *  pannable region that stops before reaching it.
- *
- *  Snaps to tile boundaries (multiples of CANVAS_WIDTH/HEIGHT) so the
- *  clamp edge matches the visible sheet edge exactly. */
-function tileWorldBounds(elements: EditorElement[]): {
-  minX: number;
-  maxX: number;
-  minY: number;
-  maxY: number;
-} {
-  let minX = 0;
-  let minY = 0;
-  let maxX = CANVAS_WIDTH;
-  let maxY = CANVAS_HEIGHT;
-  for (const el of elements) {
-    if (el.type === "line" || el.type === "arrow") {
-      const c = el as EditorElement & { x2: number; y2: number };
-      minX = Math.min(minX, el.x, c.x2);
-      minY = Math.min(minY, el.y, c.y2);
-      maxX = Math.max(maxX, el.x, c.x2);
-      maxY = Math.max(maxY, el.y, c.y2);
-    } else {
-      minX = Math.min(minX, el.x);
-      minY = Math.min(minY, el.y);
-      maxX = Math.max(maxX, el.x + el.width);
-      maxY = Math.max(maxY, el.y + el.height);
-    }
-  }
-  return {
-    minX: Math.floor(minX / CANVAS_WIDTH) * CANVAS_WIDTH,
-    maxX: Math.ceil(maxX / CANVAS_WIDTH) * CANVAS_WIDTH,
-    minY: Math.floor(minY / CANVAS_HEIGHT) * CANVAS_HEIGHT,
-    maxY: Math.ceil(maxY / CANVAS_HEIGHT) * CANVAS_HEIGHT,
-  };
-}
-
-/** Clamp a proposed (panX, panY) so the union of visible canvas tiles
- *  can't be panned past its own outer edges: at the extreme, the nearer
- *  tile edge sits PAN_EDGE_PADDING px from the matching viewport edge
- *  and no further.
- *
- *  Two regimes fall out of the same pair of bounds:
- *  - Tile union larger than viewport (zoomed in / spilled content):
- *    pan sweeps between "near edge visible with 16px gap" ↔ "far edge
- *    visible with 16px gap." Extra tiles that opened up because elements
- *    overflowed the base page are reachable because the far bound walks
- *    out to the outermost tile's edge.
- *  - Tile union smaller than viewport (zoomed out): the tiles can shift
- *    inside the viewport but always keep ≥16px margin from every edge.
- *
- *  Returns the input unchanged before the viewport has been measured
- *  (viewportWidth/Height still 0 at first paint). */
-function clampPan(
-  panX: number,
-  panY: number,
-  canvas: CanvasState,
-  elements: EditorElement[]
-): { panX: number; panY: number } {
-  const { viewportWidth, viewportHeight, zoom } = canvas;
-  if (viewportWidth <= 0 || viewportHeight <= 0) {
-    return { panX, panY };
-  }
-
-  const { minX, maxX, minY, maxY } = tileWorldBounds(elements);
-
-  // Two natural extremes per axis:
-  //   a = PAN_EDGE_PADDING - minX*zoom              (near tile edge flush-16)
-  //   b = viewportW - PAN_EDGE_PADDING - maxX*zoom  (far tile edge flush-16)
-  // Whichever is smaller is the lower bound; whichever is larger is the
-  // upper bound. The pair flips as the tile union crosses viewport size,
-  // which naturally switches between "scroll inside" and "slide within
-  // margin" modes.
-  const ax = PAN_EDGE_PADDING - minX * zoom;
-  const bx = viewportWidth - PAN_EDGE_PADDING - maxX * zoom;
-  const minPanX = Math.min(ax, bx);
-  const maxPanX = Math.max(ax, bx);
-
-  const ay = PAN_EDGE_PADDING - minY * zoom;
-  const by = viewportHeight - PAN_EDGE_PADDING - maxY * zoom;
-  const minPanY = Math.min(ay, by);
-  const maxPanY = Math.max(ay, by);
-
-  return {
-    panX: Math.min(maxPanX, Math.max(minPanX, panX)),
-    panY: Math.min(maxPanY, Math.max(minPanY, panY)),
-  };
-}
 
 /** Module-level cache for `sortedElementIds`. Keyed by `elements` identity so
  *  a content-only mutation (element moved/resized) can still short-circuit to
@@ -461,84 +374,6 @@ export function elementById(
   return map.get(id);
 }
 
-/** Module-level cache for `stableTileBounds`. Returns the previous bounds
- *  object when integer bounds are unchanged — so a Canvas subscription can
- *  hold === stability across element mutations that don't cross a tile
- *  boundary (the common case during drag). */
-let tileBoundsCache: {
-  elements: EditorElement[] | null;
-  bounds: { iMin: number; iMax: number; jMin: number; jMax: number };
-} = {
-  elements: null,
-  bounds: { iMin: 0, iMax: 0, jMin: 0, jMax: 0 },
-};
-
-/** Index range of canvas tiles needed to contain every element, with stable
- *  reference semantics across element mutations that don't change the tile
- *  count. Canvas subscribes to this directly — when it returns === to the
- *  prior result, Canvas skips a re-render during drag. */
-export function stableTileBounds(elements: EditorElement[]): {
-  iMin: number;
-  iMax: number;
-  jMin: number;
-  jMax: number;
-} {
-  if (elements === tileBoundsCache.elements) return tileBoundsCache.bounds;
-  let minX = 0;
-  let minY = 0;
-  let maxX = CANVAS_WIDTH;
-  let maxY = CANVAS_HEIGHT;
-  for (const el of elements) {
-    if (el.type === "line" || el.type === "arrow") {
-      const c = el as EditorElement & {
-        x2: number;
-        y2: number;
-        elbowCorners?: [number, number][];
-      };
-      if (c.x < minX) minX = c.x;
-      if (c.y < minY) minY = c.y;
-      if (c.x > maxX) maxX = c.x;
-      if (c.y > maxY) maxY = c.y;
-      if (c.x2 < minX) minX = c.x2;
-      if (c.y2 < minY) minY = c.y2;
-      if (c.x2 > maxX) maxX = c.x2;
-      if (c.y2 > maxY) maxY = c.y2;
-      if (c.elbowCorners) {
-        for (const [cx, cy] of c.elbowCorners) {
-          if (cx < minX) minX = cx;
-          if (cy < minY) minY = cy;
-          if (cx > maxX) maxX = cx;
-          if (cy > maxY) maxY = cy;
-        }
-      }
-    } else {
-      if (el.x < minX) minX = el.x;
-      if (el.y < minY) minY = el.y;
-      const right = el.x + el.width;
-      const bottom = el.y + el.height;
-      if (right > maxX) maxX = right;
-      if (bottom > maxY) maxY = bottom;
-    }
-  }
-  const fresh = {
-    iMin: Math.floor(minX / CANVAS_WIDTH),
-    iMax: Math.max(0, Math.ceil(maxX / CANVAS_WIDTH) - 1),
-    jMin: Math.floor(minY / CANVAS_HEIGHT),
-    jMax: Math.max(0, Math.ceil(maxY / CANVAS_HEIGHT) - 1),
-  };
-  const prev = tileBoundsCache.bounds;
-  if (
-    prev.iMin === fresh.iMin &&
-    prev.iMax === fresh.iMax &&
-    prev.jMin === fresh.jMin &&
-    prev.jMax === fresh.jMax
-  ) {
-    tileBoundsCache = { elements, bounds: prev };
-    return prev;
-  }
-  tileBoundsCache = { elements, bounds: fresh };
-  return fresh;
-}
 
 /** Save current working state into the pages array. Only copies `elements`
  *  (and history snapshots) — page title edits go through `renamePage` which
@@ -580,6 +415,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
     hoveredElementId: null,
     editingGroupId: null,
     editingTextId: null,
+    editingConnectorId: null,
     autoEditTextId: null,
     textVariant: "body",
     showGrid: true,
@@ -821,43 +657,48 @@ export const useEditorStore = create<EditorStore>((set, get) => {
     setPendingPathShape: (shape) => set({ pendingPathShape: shape }),
 
     setZoom: (zoom) =>
-      set((state) => {
-        // Zoom changes the pan clamp range, so re-clamp the current pan
-        // against the new zoom. The wheel handler's setZoom→setPan pair
-        // overwrites this with its cursor-anchored pan immediately after,
-        // so the re-clamp here only matters for programmatic setZoom
-        // callers (e.g., zoom-in/out buttons).
-        const nextCanvas = { ...state.canvas, zoom };
-        const clamped = clampPan(
-          state.canvas.panX,
-          state.canvas.panY,
-          nextCanvas,
-          state.elements
-        );
-        return { canvas: { ...nextCanvas, ...clamped } };
-      }),
+      set((state) => ({ canvas: { ...state.canvas, zoom } })),
 
     setPan: (panX, panY) =>
-      set((state) => ({
-        canvas: {
-          ...state.canvas,
-          ...clampPan(panX, panY, state.canvas, state.elements),
-        },
-      })),
+      set((state) => ({ canvas: { ...state.canvas, panX, panY } })),
 
     setViewportSize: (viewportWidth, viewportHeight) =>
-      set((state) => {
-        const nextCanvas = { ...state.canvas, viewportWidth, viewportHeight };
-        // A shrinking viewport can push the current pan out of range —
-        // re-clamp so the content doesn't suddenly fall off-screen.
-        const clamped = clampPan(
-          state.canvas.panX,
-          state.canvas.panY,
-          nextCanvas,
-          state.elements
-        );
-        return { canvas: { ...nextCanvas, ...clamped } };
-      }),
+      set((state) => ({
+        canvas: { ...state.canvas, viewportWidth, viewportHeight },
+      })),
+
+    fitView: () => {
+      const { elements, canvas } = get();
+      const { viewportWidth, viewportHeight } = canvas;
+      if (viewportWidth === 0 || viewportHeight === 0 || elements.length === 0) return;
+
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const el of elements) {
+        const half = (el.strokeWidth ?? 0) / 2;
+        if (el.type === "line" || el.type === "arrow") {
+          const c = el as ArrowElement | LineElement;
+          minX = Math.min(minX, c.x - half, c.x2 - half);
+          minY = Math.min(minY, c.y - half, c.y2 - half);
+          maxX = Math.max(maxX, c.x + half, c.x2 + half);
+          maxY = Math.max(maxY, c.y + half, c.y2 + half);
+        } else {
+          minX = Math.min(minX, el.x - half);
+          minY = Math.min(minY, el.y - half);
+          maxX = Math.max(maxX, el.x + el.width + half);
+          maxY = Math.max(maxY, el.y + el.height + half);
+        }
+      }
+
+      const MARGIN = 60;
+      const zoom = Math.max(MIN_ZOOM, Math.min(
+        (viewportWidth - MARGIN * 2) / (maxX - minX),
+        (viewportHeight - MARGIN * 2) / (maxY - minY),
+        MAX_ZOOM
+      ));
+      const panX = viewportWidth / 2 - ((minX + maxX) / 2) * zoom;
+      const panY = viewportHeight / 2 - ((minY + maxY) / 2) * zoom;
+      set((s) => ({ canvas: { ...s.canvas, zoom, panX, panY } }));
+    },
 
     toggleGrid: () => set((state) => ({ showGrid: !state.showGrid })),
 
@@ -974,6 +815,7 @@ export const useEditorStore = create<EditorStore>((set, get) => {
             type: "path",
             pathData: template.pathData,
             viewBox: template.viewBox,
+            shapeId: template.shapeId,
           };
           break;
       }
@@ -1060,6 +902,8 @@ export const useEditorStore = create<EditorStore>((set, get) => {
     setEditingGroupId: (id) => set({ editingGroupId: id }),
 
     setEditingTextId: (id) => set({ editingTextId: id }),
+
+    setEditingConnectorId: (id) => set({ editingConnectorId: id }),
 
     setAutoEditTextId: (id) => set({ autoEditTextId: id }),
 
@@ -1148,12 +992,85 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         ...state.history.slice(-HISTORY_LIMIT),
         state.elements,
       ];
+
+      // Same pendingMeasure machinery as addPageWithElements: stamp every
+      // new text id so its first-mount handler in TextElement runs the
+      // intrinsic-height measurement (strip minHeight, read scrollHeight).
+      // Without this, an AI-overestimated height on an `add_to_canvas`
+      // element stayed unchallenged — the synchronous useLayoutEffect is
+      // grow-only and never shrinks an over-tall box, so the box rendered
+      // with empty space below the content. `originals` snapshots only the
+      // new elements; the cascade reflow uses it to shift only NEW followers
+      // (existing canvas elements were not part of this generation).
+      const newOriginals = new Map<string, PlannedSnapshot>();
+      const newTextIds = new Set<string>();
+      for (const el of stamped) {
+        newOriginals.set(el.id, {
+          x: el.x,
+          y: el.y,
+          x2: "x2" in el ? (el as { x2?: number }).x2 : undefined,
+          y2: "y2" in el ? (el as { y2?: number }).y2 : undefined,
+          width: el.width,
+          height: el.height,
+        });
+        if (el.type === "text") newTextIds.add(el.id);
+      }
+      // Merge with whatever pending batch is already in flight (a
+      // create_canvas could be mid-measure when an add_to_canvas lands in
+      // the same response). Both batches' ids stay flagged until each
+      // text reports its measurement; reportMeasuredHeight clears the set
+      // once empty.
+      let nextPendingMeasure = state.pendingMeasure;
+      if (newTextIds.size > 0) {
+        const mergedTextIds = state.pendingMeasure
+          ? new Set([...state.pendingMeasure.textIds, ...newTextIds])
+          : newTextIds;
+        const mergedOriginals = state.pendingMeasure
+          ? new Map([
+              ...state.pendingMeasure.originals,
+              ...newOriginals,
+            ])
+          : newOriginals;
+        nextPendingMeasure = {
+          textIds: mergedTextIds,
+          originals: mergedOriginals,
+        };
+      }
+
       set({
         elements: [...mergedExisting, ...stamped],
         history: newHistory,
         future: [],
         dirtyPageIds: addDirty(state.dirtyPageIds, state.currentPageId),
+        pendingMeasure: nextPendingMeasure,
       });
+
+      // Mirror the safety timeout from addPageWithElements: if any text
+      // fails to report its measurement (mount race, render skip), force-
+      // clear our pending entries after 2 s. The identity check on
+      // `originals` prevents this stale timer from wiping out a later
+      // pending batch.
+      if (newTextIds.size > 0) {
+        const ourOriginals = newOriginals;
+        setTimeout(() => {
+          const cur = get();
+          if (
+            cur.pendingMeasure &&
+            // Only clear if NONE of our originals' ids are still in flight
+            // — i.e., we're either part of the active batch (intersection
+            // non-empty) or already fully reported (intersection empty).
+            // We force-clear only the active-and-stuck case.
+            Array.from(ourOriginals.keys()).some((id) =>
+              cur.pendingMeasure!.textIds.has(id)
+            )
+          ) {
+            console.warn(
+              `[FigurIn] addElementsToCurrentPage pendingMeasure timeout; force-clearing overlay`
+            );
+            set({ pendingMeasure: null });
+          }
+        }, 2000);
+      }
     },
 
     toggleSmartFigure: () =>
@@ -1200,6 +1117,33 @@ export const useEditorStore = create<EditorStore>((set, get) => {
           textIds.size > 0 ? { textIds, originals } : null,
         dirtyPageIds: addDirty(state.dirtyPageIds, newPage.id),
       });
+
+      // Safety net: if any text element fails to report its measured height
+      // (parented to a frame whose childIds drift, render skipped, mount
+      // race, etc.), the overlay would otherwise stay visible forever. By
+      // 2 seconds after the page commit, every TextElement that's going to
+      // mount will have run its first-mount layout effect — anything still
+      // pending is permanently stuck. Force-clear, but only if the SAME
+      // pending set is still active (the `originals === ourOriginals`
+      // identity check); a follow-up generation that installs a new
+      // pendingMeasure must not be wiped out by a stale timer from this one.
+      if (textIds.size > 0) {
+        const ourOriginals = originals;
+        setTimeout(() => {
+          const cur = get();
+          if (
+            cur.pendingMeasure &&
+            cur.pendingMeasure.originals === ourOriginals
+          ) {
+            const stuck = cur.pendingMeasure.textIds.size;
+            console.warn(
+              `[FigurIn] pendingMeasure timeout: ${stuck} text(s) didn't report; force-clearing overlay`
+            );
+            set({ pendingMeasure: null });
+          }
+        }, 2000);
+      }
+
       return newPage.id;
     },
 
@@ -1231,10 +1175,14 @@ export const useEditorStore = create<EditorStore>((set, get) => {
           };
         }
 
-        // Mutate in place so applyCascadeReflow can treat elements as a
-        // plain array of records. We already cloned via `map` above so
-        // this doesn't touch the pre-report state tree.
-        applyCascadeReflow(nextElements, state.pendingMeasure.originals);
+        // applyCascadeReflow returns a new array. Shifted elements get new
+        // object references so Zustand's selector equality check (Object.is)
+        // detects the change and triggers CanvasElement re-renders immediately,
+        // without requiring a page refresh.
+        const reflowedElements = applyCascadeReflow(
+          nextElements,
+          state.pendingMeasure.originals
+        );
 
         // Commit the reflowed elements into both the working state AND the
         // current page's snapshot so the persist / switch-page flow sees
@@ -1244,12 +1192,12 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         // existed on screen — the user saw the overlay the whole time).
         const pages = state.pages.map((p) =>
           p.id === state.currentPageId
-            ? { ...p, elements: nextElements, history: [], future: [] }
+            ? { ...p, elements: reflowedElements, history: [], future: [] }
             : p
         );
 
         return {
-          elements: nextElements,
+          elements: reflowedElements,
           pages,
           history: [],
           future: [],
@@ -1317,6 +1265,14 @@ export const useEditorStore = create<EditorStore>((set, get) => {
         editingGroupId: null,
         editingTextId: null,
         autoEditTextId: null,
+        // pendingMeasure is page-scoped: it tracks text ids that need first-
+        // mount measurement on the page that was just generated. Switching
+        // away unmounts those texts before they can report, leaving the
+        // overlay stuck on whatever page the user lands on next. Drop it on
+        // page switch — the abandoned page won't get its cascade reflow,
+        // but it can do its first-mount measurement on revisit and the
+        // current page is unblocked.
+        pendingMeasure: null,
       });
     },
 
