@@ -73,6 +73,7 @@ export type LineElement = BaseElement & {
   startConnectedTo?: string;
   /** Element ID that the end point is connected to */
   endConnectedTo?: string;
+  label?: string;
 };
 
 export type EdgeDir = "up" | "down" | "left" | "right";
@@ -99,6 +100,9 @@ export type ArrowElement = BaseElement & {
   startConnectedTo?: string;
   /** Element ID that the end point is connected to */
   endConnectedTo?: string;
+  sourceLabel?: string;
+  label?: string;
+  targetLabel?: string;
 };
 
 export type TextElement = BaseElement & {
@@ -129,6 +133,9 @@ export type PathElement = BaseElement & {
   type: "path";
   pathData: string; // SVG path d attribute
   viewBox: string; // e.g. "0 0 200 100"
+  /** Id of the originating FlowchartShape. Present when the element was
+   *  created from a preset; absent for AI-generated / freeform paths. */
+  shapeId?: string;
 };
 
 /** Main-axis packing when layoutMode !== "none". Ignored otherwise — elements
