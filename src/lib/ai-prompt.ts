@@ -236,11 +236,12 @@ function elementTypeDocs(): string {
 width MUST equal height. Emit them equal; the post-processor widens the shorter side if not.
 
 ### Line / Arrow (connectors)
-\`{ "id", "type": "line"|"arrow", "x", "y", "x2", "y2", "width": 0, "height": 0, "rotation": 0, "fill": "none", "stroke": "<hex>", "strokeWidth": 2, "opacity": 1, "zIndex", "headStyle": "triangle"|"open"|"none", "tailStyle": "none"|"triangle"|"open", "lineStyle": "straight"|"curved"|"elbow" }\`
+\`{ "id", "type": "arrow", "x", "y", "x2", "y2", "width": 0, "height": 0, "rotation": 0, "fill": "none", "stroke": "<hex>", "strokeWidth": 2, "opacity": 1, "zIndex", "headStyle": "triangle"|"open"|"none", "tailStyle": "none"|"triangle"|"open", "lineStyle": "straight"|"curved"|"elbow", "sourceLabel"?: "<string>", "label"?: "<string>", "targetLabel"?: "<string>" }\`
+\`{ "id", "type": "line", "x", "y", "x2", "y2", "width": 0, "height": 0, "rotation": 0, "fill": "none", "stroke": "<hex>", "strokeWidth": 2, "opacity": 1, "zIndex", "headStyle": "none", "tailStyle": "none", "lineStyle": "straight"|"curved"|"elbow", "label"?: "<string>" }\`
 - "arrow" = directional (default headStyle "triangle"). "line" = non-directional (default headStyle "none").
 - Both support the same lineStyle / headStyle / tailStyle.
-- Endpoints sit ON an element edge — see Position Planning Step E. The server auto-fills startDir / endDir from coordinates; do NOT emit them yourself.
-- NEVER emit startConnectedTo / endConnectedTo / cx / cy / elbowCorners. Those are interactive-editor state (endpoint bindings, curve control point, custom elbow bends) — the renderer auto-routes curves and elbow corners from the endpoints + startDir / endDir, and the bindings would cause the arrow to drag its target element around when a user grabs it in the editor.
+- Endpoints sit ON an element edge — see Position Planning Step E. The server auto-fills startDir / endDir AND startConnectedTo / endConnectedTo from coordinates: when an endpoint lands within one grid tick of an element edge, the server records the element id as the binding so the renderer reroutes the connector when its target is moved or resized later. You don't need to do anything to opt in — emit the endpoint coords on the edge and the binding is set for you.
+- NEVER emit startConnectedTo / endConnectedTo / cx / cy / elbowCorners yourself. Those are server- or editor-managed (bindings filled in post-snap; cx/cy and elbowCorners are interactive-editor state for curve control points and custom elbow bends). The renderer auto-routes curves and elbow corners from the endpoints + startDir / endDir.
 - rotation is always 0 for lines/arrows. The visible angle is derived from (x, y) → (x2, y2); set it with the endpoints, not a rotation field.
 
 ### Text
@@ -466,7 +467,7 @@ Each message is ONE "arrow" with lineStyle "straight" (lifelines are vertical �
 - Messages share NO groupId with actors (they connect actors, they don't belong to one).
 
 ### 4. Message labels (above each arrow)
-- Primary label: variant "caption", fontWeight handled by variant, zIndex 28, textAlign "center". Caption width = 160. \`midX = round_to_5((x + x2) / 2)\`, \`label.x = round_to_5(midX − 80)\`, \`label.y = round_to_5(message_y[k] − label_height[k] − 6)\`. \`label_height[k]\` is the planning-table caption value for the line count this label will wrap to: **25** (1 line), **40** (2 lines), **55** (3+ lines). Pick by counting \`<br>\` tags AND estimating soft wraps at caption width 160 — a label with more characters than will fit on one 160-wide line MUST use the 2-line value, or it overflows downward onto its own arrow. The label's bottom always lands exactly 6px above the arrow regardless of line count.
+- Primary label: variant "caption", **emit \`"width": 200\` explicitly** (message names are longer than actor labels — 200 fits more on one line), fontWeight handled by variant, zIndex 28, textAlign "center". \`midX = round_to_5((x + x2) / 2)\`, \`label.x = round_to_5(midX − 100)\`, \`label.y = round_to_5(message_y[k] − label_height[k] − 6)\`. \`label_height[k]\` is the planning-table caption value for the line count this label will wrap to: **25** (1 line), **40** (2 lines), **55** (3+ lines). Pick by counting \`<br>\` tags AND estimating soft wraps at width 200 — a label with more characters than will fit on one 200-wide line MUST use the 2-line value, or it overflows downward onto its own arrow. The label's bottom always lands exactly 6px above the arrow regardless of line count.
 - **fill / stroke — copy from the sketch.** Default to fill "none" and stroke "none" when the sketch shows a plain floating label. If the sketch draws the label inside a filled pill / bordered container, copy those colors exactly (fill + stroke + strokeWidth + borderRadius on the text element). Heads-up: a colored fill will paint opaquely over the lifeline segment behind the label — this is fine when the sketch shows it, but avoid an unintended fill that silently breaks a lifeline you meant to keep visible.
 - Optional parameter sub-label: caption variant, monospace family, textAlign "center". Positioned 4px below primary: \`sub.y = primary.y + 20 + 4\`. Same fill / stroke rule as the primary label — copy from the sketch.
 - Labels are NOT in any groupId (they float above a connector, they don't belong to an actor or message composite).
@@ -616,10 +617,11 @@ Self-check before emitting an arrow/line: trace the path in your head from \`(x,
 ### Styling
 - Stroke palette: #64748b neutral, #ef4444 threat/attack, #3b82f6 data flow, #22c55e success/defense, #f59e0b warning.
 - strokeWidth 1.5 standard, 2 for emphasis.
-- Annotation text at arrow midpoint:
-  \`midX = round_to_5((x + x2) / 2)\`, \`midY = round_to_5((y + y2) / 2)\`.
-  Offset to avoid overlap: horizontal arrow → midY − 18; vertical → midX + 12.
-  fontSize 11, color #64748b.`;
+- **Connector labels — use built-in fields, never separate text elements:**
+  - Arrows support three optional label fields: \`sourceLabel\` (rendered near the start endpoint), \`label\` (rendered at the midpoint — also editable by double-click in the editor), \`targetLabel\` (rendered near the end endpoint). Use these instead of creating separate \`type: "text"\` elements to annotate connectors.
+  - Lines support one optional label field: \`label\` (rendered at the midpoint). Use it instead of a separate text element.
+  - Omit any label field whose value would be empty. All three are optional strings.
+  - Example: \`{ "type": "arrow", ..., "sourceLabel": "req", "label": "HTTP/2", "targetLabel": "resp" }\``;
 }
 
 function groupingSystem(): string {

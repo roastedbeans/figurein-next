@@ -733,6 +733,7 @@ function ArrowElementImpl({ element, dataId }: { element: ArrowElementType; data
         const committedRef = { current: false };
         return (
           <foreignObject
+            data-no-export=""
             x={labelPositions.center.x - 60}
             y={labelPositions.center.y - 12}
             width={120}
