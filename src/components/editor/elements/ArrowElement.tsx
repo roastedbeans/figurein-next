@@ -729,54 +729,61 @@ function ArrowElementImpl({ element, dataId }: { element: ArrowElementType; data
         />
       )}
       {/* Inline center-label editor (activated by double-click) */}
-      {isEditing && (
-        <foreignObject
-          x={labelPositions.center.x - 60}
-          y={labelPositions.center.y - 12}
-          width={120}
-          height={24}
-          style={{ overflow: "visible" }}
-        >
-          <div style={{ width: "120px" }}>
-            <input
-              type="text"
-              autoFocus
-              defaultValue={resolved.label ?? ""}
-              onBlur={(e) => {
-                updateElement(element.id, {
-                  label: e.currentTarget.value.trim() || undefined,
-                });
-                setEditingConnectorId(null);
-              }}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  updateElement(element.id, {
-                    label: e.currentTarget.value.trim() || undefined,
-                  });
+      {isEditing && (() => {
+        const committedRef = { current: false };
+        return (
+          <foreignObject
+            x={labelPositions.center.x - 60}
+            y={labelPositions.center.y - 12}
+            width={120}
+            height={24}
+            style={{ overflow: "visible" }}
+          >
+            <div style={{ width: "120px" }}>
+              <input
+                type="text"
+                autoFocus
+                defaultValue={resolved.label ?? ""}
+                onBlur={(e) => {
+                  if (!committedRef.current) {
+                    updateElement(element.id, {
+                      label: e.currentTarget.value.trim() || undefined,
+                    });
+                  }
                   setEditingConnectorId(null);
-                  e.currentTarget.blur();
-                }
-                if (e.key === "Escape") {
-                  setEditingConnectorId(null);
-                  e.currentTarget.blur();
-                }
-                e.stopPropagation();
-              }}
-              style={{
-                width: "100%",
-                fontSize: "12px",
-                textAlign: "center",
-                border: "1px solid hsl(221 83% 53%)",
-                borderRadius: "4px",
-                padding: "2px 4px",
-                outline: "none",
-                background: "white",
-                boxSizing: "border-box" as const,
-              }}
-            />
-          </div>
-        </foreignObject>
-      )}
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    committedRef.current = true;
+                    updateElement(element.id, {
+                      label: e.currentTarget.value.trim() || undefined,
+                    });
+                    setEditingConnectorId(null);
+                    e.currentTarget.blur();
+                  }
+                  if (e.key === "Escape") {
+                    committedRef.current = true;
+                    setEditingConnectorId(null);
+                    e.currentTarget.blur();
+                  }
+                  e.stopPropagation();
+                }}
+                style={{
+                  width: "100%",
+                  fontSize: "12px",
+                  textAlign: "center",
+                  border: "1px solid hsl(221 83% 53%)",
+                  borderRadius: "4px",
+                  padding: "2px 4px",
+                  outline: "none",
+                  background: "white",
+                  boxSizing: "border-box" as const,
+                }}
+              />
+            </div>
+          </foreignObject>
+        );
+      })()}
     </g>
   );
 }

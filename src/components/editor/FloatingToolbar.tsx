@@ -543,6 +543,7 @@ export function FloatingToolbar() {
   const element = useEditorStore((s) =>
     s.selectedElementId ? elementById(s.elements, s.selectedElementId) ?? null : null
   );
+  const editingConnectorId = useEditorStore((s) => s.editingConnectorId);
   const {
     updateElement,
     updateElementLive,
@@ -833,7 +834,7 @@ export function FloatingToolbar() {
         )}
 
         {/* Connector labels */}
-        {(element.type === "line" || element.type === "arrow") && (
+        {(element.type === "line" || element.type === "arrow") && editingConnectorId !== element.id && (
           <>
             <Separator orientation="vertical" className="mx-0.5" />
             {element.type === "arrow" && (
@@ -842,6 +843,11 @@ export function FloatingToolbar() {
                 placeholder="Source label"
                 value={(element as ArrowElementType).sourceLabel ?? ""}
                 onChange={(e) =>
+                  updateLive({
+                    sourceLabel: e.target.value || undefined,
+                  } as Partial<EditorElement>)
+                }
+                onBlur={(e) =>
                   update({
                     sourceLabel: e.target.value || undefined,
                   } as Partial<EditorElement>)
@@ -854,6 +860,11 @@ export function FloatingToolbar() {
               placeholder="Label"
               value={(element as ArrowElementType).label ?? ""}
               onChange={(e) =>
+                updateLive({
+                  label: e.target.value || undefined,
+                } as Partial<EditorElement>)
+              }
+              onBlur={(e) =>
                 update({
                   label: e.target.value || undefined,
                 } as Partial<EditorElement>)
@@ -866,6 +877,11 @@ export function FloatingToolbar() {
                 placeholder="Target label"
                 value={(element as ArrowElementType).targetLabel ?? ""}
                 onChange={(e) =>
+                  updateLive({
+                    targetLabel: e.target.value || undefined,
+                  } as Partial<EditorElement>)
+                }
+                onBlur={(e) =>
                   update({
                     targetLabel: e.target.value || undefined,
                   } as Partial<EditorElement>)
