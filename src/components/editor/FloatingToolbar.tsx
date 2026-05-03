@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useShallow } from "zustand/react/shallow";
-import { useEditorStore } from "@/stores/editor-store";
+import { elementById, useEditorStore } from "@/stores/editor-store";
 import { Button } from "@/components/ui/button";
 import { DragNumberInput } from "@/components/ui/drag-number-input";
 import { Separator } from "@/components/ui/separator";
@@ -32,8 +32,8 @@ import {
 import { ColorPickerField } from "@/components/editor/ColorPicker";
 import { ReplacePopover, isReplaceable } from "@/components/editor/ReplacePopover";
 import { cn } from "@/lib/utils";
-import type { EditorElement, StrokeStyle } from "@/types/editor";
-import { SNAP_SIZE } from "@/lib/constants";
+import type { ArrowElement as ArrowElementType, EditorElement, StrokeStyle } from "@/types/editor";
+import { SNAP_SIZE, TEXT_VARIANTS } from "@/lib/constants";
 
 type EndStyle = "triangle" | "open" | "none";
 const END_STYLES: EndStyle[] = ["triangle", "open", "none"];
@@ -467,12 +467,83 @@ function NumberField({
   return <DragNumberInput aria-label={label} label={label} {...props} />;
 }
 
+const TEXT_PRESET_VARIANTS = [
+  { key: "heading", label: "Heading", short: "H" },
+  { key: "subheading", label: "Subheading", short: "Sub" },
+  { key: "body", label: "Body", short: "Body" },
+  { key: "caption", label: "Caption", short: "Cap" },
+] as const;
+
+function TextPresetPicker({
+  fontSize,
+  fontWeight,
+  onChange,
+}: {
+  fontSize: number;
+  fontWeight: "normal" | "bold";
+  onChange: (fontSize: number, fontWeight: "normal" | "bold") => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const active = TEXT_PRESET_VARIANTS.find(
+    (p) =>
+      TEXT_VARIANTS[p.key].fontSize === fontSize &&
+      TEXT_VARIANTS[p.key].fontWeight === fontWeight
+  );
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger
+        aria-label="Text style preset"
+        title={active ? active.label : "Text style preset"}
+        className={cn(
+          "inline-flex h-7 cursor-pointer items-center rounded-md border px-1.5 text-[10px] font-medium transition-colors",
+          active
+            ? "border-primary bg-primary/5 text-primary"
+            : "border-transparent bg-background text-muted-foreground hover:bg-accent hover:text-foreground"
+        )}
+      >
+        {active ? active.short : "—"}
+      </PopoverTrigger>
+      <PopoverContent side="bottom" className="w-auto p-1">
+        <div className="flex flex-col gap-0.5">
+          {TEXT_PRESET_VARIANTS.map((p) => {
+            const vt = TEXT_VARIANTS[p.key];
+            const isActive =
+              vt.fontSize === fontSize && vt.fontWeight === fontWeight;
+            return (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => {
+                  onChange(vt.fontSize, vt.fontWeight);
+                  setOpen(false);
+                }}
+                className={cn(
+                  "flex items-center justify-between gap-4 rounded-md px-2 py-1 transition-colors",
+                  isActive
+                    ? "bg-accent text-accent-foreground"
+                    : "hover:bg-accent/50"
+                )}
+              >
+                <span style={{ fontSize: Math.min(vt.fontSize, 18), fontWeight: vt.fontWeight, lineHeight: 1 }}>
+                  {p.label}
+                </span>
+                <span className="text-[10px] text-muted-foreground">{vt.fontSize}px</span>
+              </button>
+            );
+          })}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 /** Contextual top toolbar — appears at the top-center of the canvas area
  *  whenever an element is selected and surfaces the selection's properties. */
 export function FloatingToolbar() {
+  const element = useEditorStore((s) =>
+    s.selectedElementId ? elementById(s.elements, s.selectedElementId) ?? null : null
+  );
   const {
-    elements,
-    selectedElementId,
     updateElement,
     updateElementLive,
     deleteElement,
@@ -481,8 +552,6 @@ export function FloatingToolbar() {
     duplicateElement,
   } = useEditorStore(
     useShallow((s) => ({
-      elements: s.elements,
-      selectedElementId: s.selectedElementId,
       updateElement: s.updateElement,
       updateElementLive: s.updateElementLive,
       deleteElement: s.deleteElement,
@@ -492,7 +561,6 @@ export function FloatingToolbar() {
     }))
   );
 
-  const element = elements.find((el) => el.id === selectedElementId);
   if (!element) return null;
 
   const update = (updates: Partial<EditorElement>) =>
@@ -672,6 +740,11 @@ export function FloatingToolbar() {
               min={8}
               max={200}
             />
+            <TextPresetPicker
+              fontSize={element.fontSize}
+              fontWeight={element.fontWeight}
+              onChange={(fontSize, fontWeight) => update({ fontSize, fontWeight })}
+            />
             <div className="flex gap-0.5">
               <Toggle
                 size="sm"
@@ -756,6 +829,50 @@ export function FloatingToolbar() {
                 onChange={(headStyle) => update({ headStyle })}
               />
             </div>
+          </>
+        )}
+
+        {/* Connector labels */}
+        {(element.type === "line" || element.type === "arrow") && (
+          <>
+            <Separator orientation="vertical" className="mx-0.5" />
+            {element.type === "arrow" && (
+              <input
+                type="text"
+                placeholder="Source label"
+                value={(element as ArrowElementType).sourceLabel ?? ""}
+                onChange={(e) =>
+                  update({
+                    sourceLabel: e.target.value || undefined,
+                  } as Partial<EditorElement>)
+                }
+                className="h-7 w-[72px] rounded-md border bg-background px-1.5 text-xs"
+              />
+            )}
+            <input
+              type="text"
+              placeholder="Label"
+              value={(element as ArrowElementType).label ?? ""}
+              onChange={(e) =>
+                update({
+                  label: e.target.value || undefined,
+                } as Partial<EditorElement>)
+              }
+              className="h-7 w-[72px] rounded-md border bg-background px-1.5 text-xs"
+            />
+            {element.type === "arrow" && (
+              <input
+                type="text"
+                placeholder="Target label"
+                value={(element as ArrowElementType).targetLabel ?? ""}
+                onChange={(e) =>
+                  update({
+                    targetLabel: e.target.value || undefined,
+                  } as Partial<EditorElement>)
+                }
+                className="h-7 w-[72px] rounded-md border bg-background px-1.5 text-xs"
+              />
+            )}
           </>
         )}
 
