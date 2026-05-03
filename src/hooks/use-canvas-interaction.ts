@@ -146,6 +146,7 @@ function buildDrawingElement(opts: {
         strokeWidth: DEFAULT_STROKE_WIDTH,
         pathData: opts.pathShape!.pathData,
         viewBox: opts.pathShape!.viewBox,
+        shapeId: opts.pathShape!.id,
       };
   }
 }
@@ -392,20 +393,6 @@ function setDragging(svgRef: RefObject<SVGSVGElement | null>, active: boolean) {
   }
 }
 
-/** While `is-panning` is on, globals.css drops the feDropShadow on the sheet
- *  rect. SVG filters prevent GPU layer promotion of the pan <g>, so leaving
- *  the filter on forces Chrome to CPU-rasterize ~3200 grid lines every pan
- *  frame. Hiding it during active pan keeps motion smooth; the shadow comes
- *  back on mouseup, before the user's eyes have settled. */
-function setPanning(svgRef: RefObject<SVGSVGElement | null>, active: boolean) {
-  const svg = svgRef.current;
-  if (!svg) return;
-  if (active) {
-    svg.classList.add("is-panning");
-  } else {
-    svg.classList.remove("is-panning");
-  }
-}
 
 export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
   const modeRef = useRef<InteractionMode>({ type: "none" });
@@ -415,6 +402,29 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
     isHorizontal: boolean;
   } | null>(null);
   const spaceRef = useRef(false);
+
+  // DOM nodes for imperative CSS transforms during single-element drag.
+  // Bypasses React reconciliation entirely — visual tracking comes from
+  // CSS translate applied on every raw mousemove; React only commits once
+  // on mouseup via updateElementsLive.
+  // Text elements (foreignObject) are excluded — will-change: transform on a
+  // <g> containing foreignObject causes the compositor to rasterize HTML at
+  // the wrong scale, visually stretching the element during drag.
+  const dragNodeRefs = useRef<SVGGElement[]>([]);
+  // Nodes that receive a drop-shadow filter during drag (all element types,
+  // including text which is excluded from dragNodeRefs).
+  const dragShadowNodesRef = useRef<SVGGElement[]>([]);
+  // Canvas state snapshot at drag start. Cached once so the raw mousemove
+  // handler never calls getBoundingClientRect() per-event (layout thrash).
+  const dragCacheRef = useRef<{
+    svgRect: DOMRect;
+    panX: number;
+    panY: number;
+    zoom: number;
+  } | null>(null);
+  // Full element + connector updates from the last rAF frame. Applied in
+  // one shot on mouseup instead of every rAF frame.
+  const pendingFrameUpdatesRef = useRef<Map<string, Partial<EditorElement>> | null>(null);
 
   const store = useEditorStore;
 
@@ -441,7 +451,6 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
           origPanX: panX,
           origPanY: panY,
         };
-        setPanning(svgRef, true);
         return;
       }
 
@@ -965,6 +974,40 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
           // to where the element started, not through every pointer frame.
           state.pushHistory();
           mode.moved = true;
+
+          // Collect DOM nodes for imperative CSS transforms (single-element
+          // drag only — group drag keeps the React path for all its highlights).
+          if (!mode.groupOrigs) {
+            const svg = svgRef.current;
+            if (svg) {
+              const nodes: SVGGElement[] = [];
+              const shadowNodes: SVGGElement[] = [];
+              const selId = state.selectedElementId;
+              if (selId) {
+                const selEl = state.elements.find((el) => el.id === selId);
+                const isText = selEl?.type === "text";
+                const elNode = svg.querySelector(`[data-drag-wrapper="${selId}"]`) as SVGGElement | null;
+                if (elNode) {
+                  elNode.style.filter = "drop-shadow(0 4px 16px rgba(0,0,0,0.18))";
+                  shadowNodes.push(elNode);
+                  if (!isText) {
+                    elNode.style.willChange = "transform";
+                    nodes.push(elNode);
+                  }
+                }
+                if (!isText) {
+                  const hsNode = svg.querySelector(`[data-selection-handles="${selId}"]`) as SVGGElement | null;
+                  if (hsNode) { hsNode.style.willChange = "transform"; nodes.push(hsNode); }
+                }
+              }
+              dragNodeRefs.current = nodes;
+              dragShadowNodesRef.current = shadowNodes;
+              // Cache canvas state once — raw mousemove reuses this instead
+              // of calling getBoundingClientRect() on every event.
+              dragCacheRef.current = { svgRect: svg.getBoundingClientRect(), panX, panY, zoom };
+              pendingFrameUpdatesRef.current = null;
+            }
+          }
         }
         // Snap the target position, then compute the effective delta
         const snappedX = snap(mode.origX + rawDx);
@@ -1110,9 +1153,18 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
           }
         }
 
-        // One mutation per frame — fires a single subscriber notification
-        // and does one O(N) pass over the elements array regardless of how
-        // many elements (group members + follower connectors) are moving.
+        // Single-element CSS drag: skip React reconciliation entirely during
+        // the drag. The raw mousemove applies a CSS translate for smooth
+        // sub-frame visual tracking; we store the final snapped delta and
+        // the full update map for a one-shot commit on mouseup.
+        if (dragNodeRefs.current.length > 0) {
+          pendingFrameUpdatesRef.current = frameUpdates;
+          return;
+        }
+
+        // Group drag (or no CSS nodes): one mutation per rAF frame — fires a
+        // single subscriber notification and does one O(N) pass over the
+        // elements array regardless of how many elements are moving.
         state.updateElementsLive(frameUpdates);
         return;
       }
@@ -1669,9 +1721,35 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
         state.setTool("select");
       }
     }
+    // Commit the final position for CSS-transform drags. During drag, React
+    // reconciliation was skipped entirely; we apply the pending update map now.
+    // Clearing CSS transforms first, then immediately calling updateElementsLive,
+    // lets React's useSyncExternalStore commit SVG attribute changes before the
+    // browser paints — so there is no frame where the element snaps back to its
+    // drag-start position.
+    if (mode.type === "moving" && mode.moved && dragNodeRefs.current.length > 0) {
+      const state = store.getState();
+      const pending = pendingFrameUpdatesRef.current;
+      if (pending && pending.size > 0) {
+        for (const node of dragNodeRefs.current) node.style.transform = "";
+        state.updateElementsLive(pending);
+      }
+      pendingFrameUpdatesRef.current = null;
+      dragCacheRef.current = null;
+    }
+
+    for (const node of dragShadowNodesRef.current) {
+      node.style.filter = "";
+    }
+    dragShadowNodesRef.current = [];
+    for (const node of dragNodeRefs.current) {
+      node.style.transform = "";
+      node.style.willChange = "";
+    }
+    dragNodeRefs.current = [];
+
     modeRef.current = { type: "none" };
     setDragging(svgRef, false);
-    setPanning(svgRef, false);
     store.getState().setSnapTargetId(null);
     store.getState().setRotatingElementId(null);
   }, [store, svgRef]);
@@ -1700,6 +1778,21 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
 
     const moveListener = (ev: MouseEvent) => {
       latest = ev;
+      // Instant visual feedback — apply a CSS translate to the dragged element
+      // and its selection handles on every raw mousemove, without waiting for
+      // the rAF. Uses the canvas state cached at drag start so we never call
+      // getBoundingClientRect() here (that would force a synchronous layout
+      // flush on every event, thrashing against React's attribute writes).
+      const mode = modeRef.current;
+      const cache = dragCacheRef.current;
+      if (mode.type === "moving" && mode.moved && dragNodeRefs.current.length > 0 && cache) {
+        const rawX = (ev.clientX - cache.svgRect.left - cache.panX) / cache.zoom;
+        const rawY = (ev.clientY - cache.svgRect.top - cache.panY) / cache.zoom;
+        const dx = snap(mode.origX + (rawX - mode.startX)) - mode.origX;
+        const dy = snap(mode.origY + (rawY - mode.startY)) - mode.origY;
+        const t = `translate(${dx}px,${dy}px)`;
+        for (const node of dragNodeRefs.current) node.style.transform = t;
+      }
       if (rafId === 0) rafId = requestAnimationFrame(flush);
     };
     const upListener = () => {
@@ -1724,18 +1817,9 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
   // Wheel handler must be a native event (non-passive) so preventDefault actually works.
   // React registers onWheel as passive, which silently ignores preventDefault,
   // allowing the browser's native ctrl+wheel page zoom to fire.
-  //
-  // Also toggles the `is-panning` class for the duration of a trackpad-pan
-  // burst so globals.css can drop the feDropShadow (the shadow filter blocks
-  // GPU layer promotion and forces CPU rasterization of 3200 grid lines per
-  // frame otherwise). A small trailing timeout re-adds the shadow once the
-  // user's finger leaves the trackpad — wheel events have no "end" phase.
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
-
-    let panEndTimer: ReturnType<typeof setTimeout> | null = null;
-    const PAN_END_MS = 120;
 
     const handleWheel = (e: WheelEvent) => {
       e.preventDefault();
@@ -1768,21 +1852,10 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
           state.canvas.panY - e.deltaY
         );
       }
-
-      setPanning(svgRef, true);
-      if (panEndTimer) clearTimeout(panEndTimer);
-      panEndTimer = setTimeout(() => {
-        setPanning(svgRef, false);
-        panEndTimer = null;
-      }, PAN_END_MS);
     };
 
     svg.addEventListener("wheel", handleWheel, { passive: false });
-    return () => {
-      svg.removeEventListener("wheel", handleWheel);
-      if (panEndTimer) clearTimeout(panEndTimer);
-      setPanning(svgRef, false);
-    };
+    return () => svg.removeEventListener("wheel", handleWheel);
   }, [store, svgRef]);
 
   // Space key tracking for pan mode. Lives inside useEffect so listeners
@@ -1827,7 +1900,15 @@ export function useCanvasInteraction(svgRef: RefObject<SVGSVGElement | null>) {
       const elementId = findElementId(e.target);
       if (!elementId) return;
       const el = state.elements.find((x) => x.id === elementId);
-      if (!el?.groupId) return;
+      if (!el) return;
+
+      // Double-click on a connector → open the center label editor
+      if (el.type === "arrow" || el.type === "line") {
+        state.setEditingConnectorId(elementId);
+        return;
+      }
+
+      if (!el.groupId) return;
       state.setEditingGroupId(el.groupId);
       state.selectElement(elementId);
     },
